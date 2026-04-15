@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive_ext: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive_ext: tar.gz
+          - goos: darwin
+            goarch: amd64
+            archive_ext: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive_ext: tar.gz
+          - goos: windows
+            goarch: amd64
+            archive_ext: zip
+          - goos: windows
+            goarch: arm64
+            archive_ext: zip
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          suffix=""
+          if [ "${GOOS}" = "windows" ]; then
+            suffix=".exe"
+          fi
+          go build -trimpath -ldflags="-s -w" -o "dist/teams-migrator${suffix}" ./cmd/teams-migrator
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="teams-migrator_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.${{ matrix.archive_ext }}"
+          stage_dir="$(mktemp -d)"
+          cp README.md "$stage_dir/"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            cp dist/teams-migrator.exe "$stage_dir/"
+            if [ -f LICENSE ]; then
+              cp LICENSE "$stage_dir/"
+            fi
+            (
+              cd "$stage_dir"
+              zip -q "$GITHUB_WORKSPACE/dist/$archive" teams-migrator.exe README.md
+              if [ -f LICENSE ]; then
+                zip -q "$GITHUB_WORKSPACE/dist/$archive" LICENSE
+              fi
+            )
+          else
+            cp dist/teams-migrator "$stage_dir/"
+            if [ -f LICENSE ]; then
+              cp LICENSE "$stage_dir/"
+            fi
+            tar -C "$stage_dir" -czf "dist/$archive" .
+          fi
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: teams-migrator-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/teams-migrator_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.${{ matrix.archive_ext }}
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifact directory
+        run: |
+          set -euo pipefail
+          mkdir -p publish
+          find dist -maxdepth 2 -type f -exec mv {} publish/ \;
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          (
+            cd publish
+            sha256sum teams-migrator_* > checksums.txt
+          )
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            publish/teams-migrator_*
+            publish/checksums.txt

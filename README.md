@@ -30,6 +30,51 @@ It also supports saved profiles in a cross-platform config file:
 go build -o bin/teams-migrator ./cmd/teams-migrator
 ```
 
+## Linux quick start
+If the operator is on Linux and just needs the tool installed locally with the least friction:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.sh | sh
+teams-migrator config init
+```
+
+## macOS quick start
+```bash
+curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.sh | sh
+teams-migrator config init
+```
+
+The release installer downloads the latest published GitHub Release for your OS and CPU and installs the binary into `~/.local/bin` by default.
+If that directory is not already in `PATH`, add it:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+On macOS with the default shell, use `~/.zshrc` instead of `~/.bashrc`.
+
+## Windows quick start
+```powershell
+irm https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.ps1 | iex
+teams-migrator.exe config init
+```
+
+## Source install
+If you want a source-based install instead of release binaries:
+
+```bash
+go install github.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/cmd/teams-migrator@latest
+```
+
+That requires Go 1.26 or newer. If you prefer to clone the repo first, `./scripts/install-linux.sh` still installs to `~/.local/bin/teams-migrator`.
+
+## Release process
+Push a tag like `v0.1.0` and GitHub Actions will build and publish release archives for:
+- Linux `amd64`, `arm64`
+- macOS `amd64`, `arm64`
+- Windows `amd64`, `arm64`
+
 ## First-run setup
 ```bash
 ./bin/teams-migrator config init

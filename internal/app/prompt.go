@@ -163,7 +163,7 @@ func completeConfigInteractively(cfg *Config) error {
 	}
 
 	if sourceNeedsAuth(*cfg) {
-		if err := promptForAuth(wizard, "source", &cfg.SourceAuthToken, &cfg.SourceUsername, &cfg.SourcePassword); err != nil {
+		if err := promptForAuth(wizard, "source", &cfg.SourceUsername, &cfg.SourcePassword); err != nil {
 			return err
 		}
 	}
@@ -182,7 +182,7 @@ func completeConfigInteractively(cfg *Config) error {
 		cfg.TargetBaseURL = value
 	}
 	if targetNeedsAuth(*cfg) {
-		if err := promptForAuth(wizard, "target", &cfg.TargetAuthToken, &cfg.TargetUsername, &cfg.TargetPassword); err != nil {
+		if err := promptForAuth(wizard, "target", &cfg.TargetUsername, &cfg.TargetPassword); err != nil {
 			return err
 		}
 	}
@@ -239,11 +239,11 @@ func inferSourceModeOrDefault(cfg Config) string {
 }
 
 func sourceNeedsAuth(cfg Config) bool {
-	return cfg.SourceBaseURL != "" && cfg.SourceAuthToken == "" && cfg.SourceUsername == "" && !cfg.HasSavedSecrets
+	return cfg.SourceBaseURL != "" && cfg.SourceUsername == ""
 }
 
 func targetNeedsAuth(cfg Config) bool {
-	return cfg.TargetBaseURL != "" && cfg.TargetAuthToken == "" && cfg.TargetUsername == "" && !cfg.HasSavedSecrets
+	return cfg.TargetBaseURL != "" && cfg.TargetUsername == ""
 }
 
 func runConfigInitWizard(cfg Config) error {
@@ -262,7 +262,7 @@ func runConfigInitWizard(cfg Config) error {
 	wizard := newWizard("Teams Migrator", "Config init")
 	wizard.intro([]string{
 		"This wizard creates or updates a reusable profile for future runs.",
-		"Secrets are not stored in the YAML config file. They can optionally be stored in a separate encrypted secret store.",
+		"Usernames and passwords are not stored in the profile. The CLI prompts for them at runtime when needed.",
 	})
 	wizard.note(fmt.Sprintf("Config file: %s", cfg.ConfigPath))
 
@@ -396,42 +396,6 @@ func runConfigInitWizard(cfg Config) error {
 	}
 	cfg.ReportFormat = ReportFormat(format)
 
-	collectAuth, err := wizard.choice(wizardField{
-		Label:        "Collect credentials now",
-		Description:  "You can enter credentials now, or skip and enter them when you run validate/plan/migrate.",
-		InputHelp:    "Type the number of your choice and press Enter.",
-		ArtifactInfo: "Skipping this is fine if you want to get the first test ready quickly.",
-		Default:      "no",
-	}, []string{"no", "yes"})
-	if err != nil {
-		return err
-	}
-
-	includeSecrets := false
-	if collectAuth == "yes" {
-		if cfg.SourceBaseURL != "" {
-			if err := promptForAuth(wizard, "source", &cfg.SourceAuthToken, &cfg.SourceUsername, &cfg.SourcePassword); err != nil {
-				return err
-			}
-		}
-		if err := promptForAuth(wizard, "target", &cfg.TargetAuthToken, &cfg.TargetUsername, &cfg.TargetPassword); err != nil {
-			return err
-		}
-		if hasSecrets(cfg) {
-			saveChoice, err := wizard.choice(wizardField{
-				Label:        "Save credentials for reuse",
-				Description:  "Credentials can be stored in a separate encrypted secret store keyed by profile name.",
-				InputHelp:    "Type the number of your choice and press Enter.",
-				ArtifactInfo: fmt.Sprintf("The encrypted secret store will be written to %s", defaultSecretStorePath(cfg.ConfigPath)),
-				Default:      "no",
-			}, []string{"no", "yes"})
-			if err != nil {
-				return err
-			}
-			includeSecrets = saveChoice == "yes"
-		}
-	}
-
 	setCurrent, err := wizard.choice(wizardField{
 		Label:       "Set as current profile",
 		Description: "If set to yes, this profile becomes the default when you run teams-migrator without --profile.",
@@ -452,7 +416,7 @@ func runConfigInitWizard(cfg Config) error {
 	if ok, err := wizard.confirm(wizardField{
 		Label:        "Save profile",
 		Description:  "Review the summary below and confirm that you want to write this profile to disk.",
-		ArtifactInfo: profileSummary(cfg, includeSecrets),
+		ArtifactInfo: profileSummary(cfg),
 		InputHelp:    "Type yes to save, or anything else to cancel.",
 		Default:      "yes",
 	}, "yes"); err != nil {
@@ -463,34 +427,6 @@ func runConfigInitWizard(cfg Config) error {
 
 	if err := saveProfileStore(cfg.ConfigPath, store); err != nil {
 		return err
-	}
-	if includeSecrets {
-		passphrase, err := promptSecretValue("Secret store passphrase", "Enter a passphrase for the encrypted secret store. You will need this passphrase to reuse saved credentials.")
-		if err != nil {
-			return err
-		}
-		confirm, err := promptSecretValue("Confirm passphrase", "Re-enter the passphrase to confirm.")
-		if err != nil {
-			return err
-		}
-		if passphrase != confirm {
-			return errors.New("passphrases did not match")
-		}
-		secretStore, err := loadSecretStore(cfg.SecretStorePath, passphrase)
-		if err != nil {
-			secretStore = SecretStore{}
-		}
-		secretStore[cfg.Profile] = SavedSecrets{
-			SourceAuthToken: cfg.SourceAuthToken,
-			SourceUsername:  cfg.SourceUsername,
-			SourcePassword:  cfg.SourcePassword,
-			TargetAuthToken: cfg.TargetAuthToken,
-			TargetUsername:  cfg.TargetUsername,
-			TargetPassword:  cfg.TargetPassword,
-		}
-		if err := saveSecretStore(cfg.SecretStorePath, passphrase, secretStore); err != nil {
-			return err
-		}
 	}
 
 	wizard.success(
@@ -505,54 +441,24 @@ func runConfigInitWizard(cfg Config) error {
 	return nil
 }
 
-func promptForAuth(wizard *wizardContext, label string, token, username, password *string) error {
-	mode, err := wizard.choice(wizardField{
-		Label:        fmt.Sprintf("%s authentication method", titleCase(label)),
-		Description:  fmt.Sprintf("Choose how the tool should authenticate to the %s Jira instance.", label),
-		InputHelp:    "Type the number of your choice and press Enter.",
-		ArtifactInfo: "Token uses Authorization: Bearer <token>. Basic uses username and password.",
-		Default:      "token",
-	}, []string{"token", "basic", "none"})
+func promptForAuth(wizard *wizardContext, label string, username, password *string) error {
+	user, err := wizard.value(wizardField{
+		Label:       fmt.Sprintf("%s username", titleCase(label)),
+		Description: fmt.Sprintf("Enter the username for basic authentication against the %s Jira instance.", label),
+	})
 	if err != nil {
 		return err
 	}
-
-	*token = ""
-	*username = ""
-	*password = ""
-
-	switch mode {
-	case "token":
-		value, err := wizard.secret(wizardField{
-			Label:       fmt.Sprintf("%s auth token", titleCase(label)),
-			Description: fmt.Sprintf("Enter the bearer token for the %s Jira instance.", label),
-			InputHelp:   "Type the token value. Input handling is plain-text for cross-platform consistency.",
-		})
-		if err != nil {
-			return err
-		}
-		*token = value
-	case "basic":
-		user, err := wizard.value(wizardField{
-			Label:       fmt.Sprintf("%s username", titleCase(label)),
-			Description: fmt.Sprintf("Enter the username for basic authentication against the %s Jira instance.", label),
-		})
-		if err != nil {
-			return err
-		}
-		pass, err := wizard.secret(wizardField{
-			Label:       fmt.Sprintf("%s password", titleCase(label)),
-			Description: fmt.Sprintf("Enter the password for basic authentication against the %s Jira instance.", label),
-			InputHelp:   "Type the password value. Input handling is plain-text for cross-platform consistency.",
-		})
-		if err != nil {
-			return err
-		}
-		*username = user
-		*password = pass
-	case "none":
+	pass, err := wizard.secret(wizardField{
+		Label:       fmt.Sprintf("%s password", titleCase(label)),
+		Description: fmt.Sprintf("Enter the password for basic authentication against the %s Jira instance.", label),
+		InputHelp:   "Type the password value. Input is hidden.",
+	})
+	if err != nil {
+		return err
 	}
-
+	*username = user
+	*password = pass
 	return nil
 }
 
@@ -727,12 +633,7 @@ func nonEmptyDefault(value, fallback string) string {
 	return fallback
 }
 
-func hasSecrets(cfg Config) bool {
-	return cfg.SourceAuthToken != "" || cfg.SourceUsername != "" || cfg.SourcePassword != "" ||
-		cfg.TargetAuthToken != "" || cfg.TargetUsername != "" || cfg.TargetPassword != ""
-}
-
-func profileSummary(cfg Config, includeSecrets bool) string {
+func profileSummary(cfg Config) string {
 	lines := []string{
 		fmt.Sprintf("Profile: %s", cfg.Profile),
 		fmt.Sprintf("Identity mapping: %s", cfg.IdentityMappingFile),
@@ -751,11 +652,7 @@ func profileSummary(cfg Config, includeSecrets bool) string {
 	lines = append(lines, fmt.Sprintf("Target base URL: %s", cfg.TargetBaseURL))
 	lines = append(lines, fmt.Sprintf("Output dir: %s", cfg.OutputDir))
 	lines = append(lines, fmt.Sprintf("Report format: %s", cfg.ReportFormat))
-	if includeSecrets {
-		lines = append(lines, "Credentials: encrypted secret store")
-	} else {
-		lines = append(lines, "Credentials: not saved")
-	}
+	lines = append(lines, "Credentials: prompted at runtime")
 	return strings.Join(lines, "\n")
 }
 

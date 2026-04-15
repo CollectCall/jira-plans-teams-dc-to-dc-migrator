@@ -22,20 +22,18 @@ const (
 type jiraClient struct {
 	instanceBaseURL string
 	baseURL         string
-	token           string
 	username        string
 	password        string
 	httpClient      *http.Client
 }
 
-func newJiraClient(baseURL, token, username, password string) (*jiraClient, error) {
+func newJiraClient(baseURL, username, password string) (*jiraClient, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, fmt.Errorf("jira base URL is required")
 	}
 	return &jiraClient{
 		instanceBaseURL: normalizeInstanceBaseURL(baseURL),
 		baseURL:         normalizeAPIBaseURL(baseURL),
-		token:           token,
 		username:        username,
 		password:        password,
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
@@ -263,8 +261,6 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 	}
 	if c.username != "" || c.password != "" {
 		req.SetBasicAuth(c.username, c.password)
-	} else if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 
 	resp, err := c.httpClient.Do(req)

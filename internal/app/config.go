@@ -12,11 +12,9 @@ import (
 
 const (
 	envSourceBaseURL   = "TEAMS_MIGRATOR_SOURCE_BASE_URL"
-	envSourceAuthToken = "TEAMS_MIGRATOR_SOURCE_AUTH_TOKEN"
 	envSourceUsername  = "TEAMS_MIGRATOR_SOURCE_USERNAME"
 	envSourcePassword  = "TEAMS_MIGRATOR_SOURCE_PASSWORD"
 	envTargetBaseURL   = "TEAMS_MIGRATOR_TARGET_BASE_URL"
-	envTargetAuthToken = "TEAMS_MIGRATOR_TARGET_AUTH_TOKEN"
 	envTargetUsername  = "TEAMS_MIGRATOR_TARGET_USERNAME"
 	envTargetPassword  = "TEAMS_MIGRATOR_TARGET_PASSWORD"
 	envIdentityMapping = "TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE"
@@ -34,11 +32,9 @@ const (
 type Config struct {
 	Command             string
 	SourceBaseURL       string
-	SourceAuthToken     string
 	SourceUsername      string
 	SourcePassword      string
 	TargetBaseURL       string
-	TargetAuthToken     string
 	TargetUsername      string
 	TargetPassword      string
 	IdentityMappingFile string
@@ -54,10 +50,8 @@ type Config struct {
 	Apply               bool
 	NoInput             bool
 	ConfigPath          string
-	SecretStorePath     string
 	Profile             string
 	Redacted            bool
-	HasSavedSecrets     bool
 }
 
 func parseConfig(args []string) (Config, error) {
@@ -71,11 +65,9 @@ func parseConfig(args []string) (Config, error) {
 
 	cfg := Config{Command: command}
 	fs.StringVar(&cfg.SourceBaseURL, "source-base-url", envValue(envSourceBaseURL), "Source Jira base URL")
-	fs.StringVar(&cfg.SourceAuthToken, "source-auth-token", envValue(envSourceAuthToken), "Source Jira auth token")
 	fs.StringVar(&cfg.SourceUsername, "source-username", envValue(envSourceUsername), "Source Jira username for basic auth")
 	fs.StringVar(&cfg.SourcePassword, "source-password", envValue(envSourcePassword), "Source Jira password for basic auth")
 	fs.StringVar(&cfg.TargetBaseURL, "target-base-url", envValue(envTargetBaseURL), "Target Jira base URL")
-	fs.StringVar(&cfg.TargetAuthToken, "target-auth-token", envValue(envTargetAuthToken), "Target Jira auth token")
 	fs.StringVar(&cfg.TargetUsername, "target-username", envValue(envTargetUsername), "Target Jira username for basic auth")
 	fs.StringVar(&cfg.TargetPassword, "target-password", envValue(envTargetPassword), "Target Jira password for basic auth")
 	fs.StringVar(&cfg.IdentityMappingFile, "identity-mapping", envValue(envIdentityMapping), "Path to identity mapping CSV")
@@ -122,7 +114,6 @@ func parseConfig(args []string) (Config, error) {
 			return Config{}, fmt.Errorf("loading config store: %w", err)
 		}
 		applySavedProfile(&cfg, resolveProfile(cfg, store))
-		cfg.SecretStorePath = defaultSecretStorePath(cfg.ConfigPath)
 
 		selectedProfile := cfg.Profile
 		if selectedProfile == "" {
@@ -133,13 +124,9 @@ func parseConfig(args []string) (Config, error) {
 			}
 		}
 		cfg.Profile = selectedProfile
-		cfg.HasSavedSecrets = secretStoreHasProfile(cfg.SecretStorePath, cfg.Profile)
 	}
 
 	if cfg.Command != "config init" && cfg.Command != "config show" && cfg.Command != "config path" && cfg.Command != "version" && cfg.Command != "self-update" && !cfg.NoInput {
-		if err := loadSecretsIntoConfig(&cfg); err != nil {
-			return Config{}, err
-		}
 		if err := completeConfigInteractively(&cfg); err != nil {
 			return Config{}, err
 		}

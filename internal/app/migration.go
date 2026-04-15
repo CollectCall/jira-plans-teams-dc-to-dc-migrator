@@ -66,7 +66,7 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 		return state, findings, actions
 	}
 
-	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetAuthToken, cfg.TargetUsername, cfg.TargetPassword)
+	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 	if err != nil {
 		findings = append(findings, newFinding(SeverityError, "target_client", err.Error()))
 		return state, findings, actions
@@ -123,52 +123,52 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 
 	runLoad("source_teams_load", SeverityError, func() error {
 		var loadErr error
-		sourceTeams, loadErr = loadTeams(cfg.SourceBaseURL, cfg.SourceAuthToken, cfg.SourceUsername, cfg.SourcePassword, cfg.TeamsFile)
+		sourceTeams, loadErr = loadTeams(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.TeamsFile)
 		return loadErr
 	})
 	runLoad("source_programs_load", SeverityWarning, func() error {
 		var loadErr error
-		sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceAuthToken, cfg.SourceUsername, cfg.SourcePassword)
+		sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword)
 		return loadErr
 	})
 	runLoad("source_plans_load", SeverityWarning, func() error {
 		var loadErr error
-		sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceAuthToken, cfg.SourceUsername, cfg.SourcePassword)
+		sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword)
 		return loadErr
 	})
 	runLoad("source_persons_load", SeverityError, func() error {
 		var loadErr error
-		sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceAuthToken, cfg.SourceUsername, cfg.SourcePassword, cfg.PersonsFile)
+		sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.PersonsFile)
 		return loadErr
 	})
 	runLoad("source_resources_load", SeverityError, func() error {
 		var loadErr error
-		sourceResources, loadErr = loadResources(cfg.SourceBaseURL, cfg.SourceAuthToken, cfg.SourceUsername, cfg.SourcePassword, cfg.ResourcesFile)
+		sourceResources, loadErr = loadResources(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.ResourcesFile)
 		return loadErr
 	})
 	runLoad("target_teams_load", SeverityError, func() error {
 		var loadErr error
-		targetTeams, loadErr = loadTeams(cfg.TargetBaseURL, cfg.TargetAuthToken, cfg.TargetUsername, cfg.TargetPassword, "")
+		targetTeams, loadErr = loadTeams(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "")
 		return loadErr
 	})
 	runLoad("target_programs_load", SeverityWarning, func() error {
 		var loadErr error
-		targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetAuthToken, cfg.TargetUsername, cfg.TargetPassword)
+		targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 		return loadErr
 	})
 	runLoad("target_plans_load", SeverityWarning, func() error {
 		var loadErr error
-		targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetAuthToken, cfg.TargetUsername, cfg.TargetPassword)
+		targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 		return loadErr
 	})
 	runLoad("target_persons_load", SeverityError, func() error {
 		var loadErr error
-		targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetAuthToken, cfg.TargetUsername, cfg.TargetPassword, "")
+		targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "")
 		return loadErr
 	})
 	runLoad("target_resources_load", SeverityWarning, func() error {
 		var loadErr error
-		targetResources, loadErr = loadResources(cfg.TargetBaseURL, cfg.TargetAuthToken, cfg.TargetUsername, cfg.TargetPassword, "")
+		targetResources, loadErr = loadResources(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "")
 		return loadErr
 	})
 
@@ -191,7 +191,7 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 
 	progress.Start("Hydrating resource-linked persons")
 	if strings.TrimSpace(cfg.SourceBaseURL) != "" {
-		if sourceClient, err := newJiraClient(cfg.SourceBaseURL, cfg.SourceAuthToken, cfg.SourceUsername, cfg.SourcePassword); err == nil {
+		if sourceClient, err := newJiraClient(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword); err == nil {
 			sourcePersons, findings = hydrateResourceLinkedPersons(sourceClient, sourcePersons, sourceResources, "source", findings)
 		}
 	}
@@ -199,7 +199,7 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 
 	progress.Start("Resolving target Jira users")
 	if strings.TrimSpace(cfg.TargetBaseURL) != "" {
-		if targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetAuthToken, cfg.TargetUsername, cfg.TargetPassword); err == nil {
+		if targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword); err == nil {
 			mapping, targetPersons, findings = resolveTargetUsersForResourcePersons(targetClient, mapping, sourcePersons, sourceResources, targetPersons, findings)
 		}
 	}
@@ -276,7 +276,7 @@ func sourceIssueClient(cfg Config) (*jiraClient, error) {
 	if strings.TrimSpace(cfg.SourceBaseURL) == "" {
 		return nil, nil
 	}
-	return newJiraClient(cfg.SourceBaseURL, cfg.SourceAuthToken, cfg.SourceUsername, cfg.SourcePassword)
+	return newJiraClient(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword)
 }
 
 func buildTeamMappings(sourceTeams, targetTeams []TeamDTO) []TeamMapping {
@@ -620,55 +620,55 @@ func writeGeneratedIdentityMapping(cfg Config, mappings IdentityMapping) (string
 	return path, writer.Error()
 }
 
-func loadTeams(baseURL, token, username, password, file string) ([]TeamDTO, error) {
+func loadTeams(baseURL, username, password, file string) ([]TeamDTO, error) {
 	if file != "" {
 		return loadJSONFile[TeamDTO](file)
 	}
-	client, err := newJiraClient(baseURL, token, username, password)
+	client, err := newJiraClient(baseURL, username, password)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListTeams()
 }
 
-func loadPersons(baseURL, token, username, password, file string) ([]PersonDTO, error) {
+func loadPersons(baseURL, username, password, file string) ([]PersonDTO, error) {
 	if file != "" {
 		return loadJSONFile[PersonDTO](file)
 	}
-	client, err := newJiraClient(baseURL, token, username, password)
+	client, err := newJiraClient(baseURL, username, password)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListPersons()
 }
 
-func loadResources(baseURL, token, username, password, file string) ([]ResourceDTO, error) {
+func loadResources(baseURL, username, password, file string) ([]ResourceDTO, error) {
 	if file != "" {
 		return loadJSONFile[ResourceDTO](file)
 	}
-	client, err := newJiraClient(baseURL, token, username, password)
+	client, err := newJiraClient(baseURL, username, password)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListResources()
 }
 
-func loadPrograms(baseURL, token, username, password string) ([]ProgramDTO, error) {
+func loadPrograms(baseURL, username, password string) ([]ProgramDTO, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, nil
 	}
-	client, err := newJiraClient(baseURL, token, username, password)
+	client, err := newJiraClient(baseURL, username, password)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListPrograms()
 }
 
-func loadPlans(baseURL, token, username, password string) ([]PlanDTO, error) {
+func loadPlans(baseURL, username, password string) ([]PlanDTO, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, nil
 	}
-	client, err := newJiraClient(baseURL, token, username, password)
+	client, err := newJiraClient(baseURL, username, password)
 	if err != nil {
 		return nil, err
 	}

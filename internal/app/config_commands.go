@@ -8,7 +8,6 @@ import (
 
 type configShowOutput struct {
 	ConfigPath      string                    `json:"configPath"`
-	SecretStorePath string                    `json:"secretStorePath"`
 	CurrentProfile  string                    `json:"currentProfile"`
 	SelectedProfile string                    `json:"selectedProfile"`
 	Profile         map[string]any            `json:"profile,omitempty"`
@@ -32,17 +31,16 @@ func runConfigShow(cfg Config) error {
 
 	out := configShowOutput{
 		ConfigPath:      cfg.ConfigPath,
-		SecretStorePath: cfg.SecretStorePath,
 		CurrentProfile:  store.CurrentProfile,
 		SelectedProfile: selectedProfile,
 		Profiles:        map[string]map[string]any{},
 	}
 
 	for name, profile := range store.Profiles {
-		out.Profiles[name] = profileToMap(name, cfg.SecretStorePath, profile)
+		out.Profiles[name] = profileToMap(profile)
 	}
 	if profile, ok := store.Profiles[selectedProfile]; ok {
-		out.Profile = profileToMap(selectedProfile, cfg.SecretStorePath, profile)
+		out.Profile = profileToMap(profile)
 	}
 
 	encoder := json.NewEncoder(os.Stdout)
@@ -53,7 +51,7 @@ func runConfigShow(cfg Config) error {
 	return nil
 }
 
-func profileToMap(profileName, secretStorePath string, profile SavedProfile) map[string]any {
+func profileToMap(profile SavedProfile) map[string]any {
 	out := map[string]any{
 		"source_base_url":       profile.SourceBaseURL,
 		"target_base_url":       profile.TargetBaseURL,
@@ -64,7 +62,6 @@ func profileToMap(profileName, secretStorePath string, profile SavedProfile) map
 		"issues_csv":            profile.IssuesCSV,
 		"output_dir":            profile.OutputDir,
 		"report_format":         profile.ReportFormat,
-		"saved_secrets":         secretStoreHasProfile(secretStorePath, profileName),
 	}
 	return out
 }

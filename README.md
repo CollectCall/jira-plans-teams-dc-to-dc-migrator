@@ -77,11 +77,13 @@ teams-migrator validate \
 ```bash
 teams-migrator migrate \
   --source-base-url https://source.example.com/jira \
-  --source-auth-token "$SOURCE_PAT" \
+  --source-username "$SOURCE_USERNAME" \
+  --source-password "$SOURCE_PASSWORD" \
   --target-base-url https://target.example.com/jira \
-  --target-auth-token "$TARGET_PAT" \
+  --target-username "$TARGET_USERNAME" \
+  --target-password "$TARGET_PASSWORD" \
   --identity-mapping ./identity-mapping.csv \
   --apply
 ```
 
-If username and password are provided, the CLI uses basic auth. Otherwise it uses `Authorization: Bearer <token>` when an auth token is set.
+The CLI uses basic auth for Jira API access. When credentials are not supplied through flags or environment variables, it prompts for them at runtime and does not store them in the profile.

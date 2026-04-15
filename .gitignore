@@ -4,3 +4,4 @@ bin/
 .gopath/
 out/
 teams-migrator
+AGENTS.md

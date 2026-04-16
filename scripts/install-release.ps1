@@ -11,6 +11,41 @@ $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitect
     default { throw "Unsupported Windows architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
 }
 
+function Test-WritableDirectory {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return $false
+    }
+
+    $probe = Join-Path $Path (".teams-migrator-write-test-" + [System.Guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType File -Path $probe -Force | Out-Null
+        Remove-Item -LiteralPath $probe -Force
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Resolve-InstallDir {
+    if ($env:INSTALL_DIR) {
+        return $env:INSTALL_DIR
+    }
+
+    foreach ($Candidate in ($env:PATH -split ";")) {
+        if ([string]::IsNullOrWhiteSpace($Candidate)) {
+            continue
+        }
+        if (Test-WritableDirectory -Path $Candidate) {
+            return $Candidate
+        }
+    }
+
+    return $InstallDir
+}
+
 $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("teams-migrator-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tmpDir | Out-Null
 
@@ -29,6 +64,7 @@ try {
     $zipPath = Join-Path $tmpDir $archive
     Invoke-WebRequest -Uri $url -OutFile $zipPath
 
+    $InstallDir = Resolve-InstallDir
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
     Copy-Item (Join-Path $tmpDir "teams-migrator.exe") (Join-Path $InstallDir "teams-migrator.exe") -Force

@@ -25,8 +25,8 @@ irm https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migr
 teams-migrator.exe config init
 ```
 
-The release installer downloads the latest published GitHub Release for your OS and CPU and installs the binary into `~/.local/bin` on Linux/macOS by default.
-If needed, add that directory to `PATH`.
+The release installer downloads the latest published GitHub Release for your OS and CPU and prefers a writable directory already on `PATH`.
+If none is available, it falls back to a user-local bin directory and tells you what to add to `PATH`.
 
 ## Commands
 

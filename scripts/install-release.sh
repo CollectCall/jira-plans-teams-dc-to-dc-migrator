@@ -51,11 +51,34 @@ resolve_version() {
   fi
 }
 
+choose_install_dir() {
+  if [ -n "${INSTALL_DIR:-}" ]; then
+    printf '%s\n' "$INSTALL_DIR"
+    return 0
+  fi
+
+  old_ifs=$IFS
+  IFS=:
+  for dir in ${PATH:-}; do
+    [ -n "$dir" ] || continue
+    [ -d "$dir" ] || continue
+    [ -w "$dir" ] || continue
+    printf '%s\n' "$dir"
+    IFS=$old_ifs
+    return 0
+  done
+  IFS=$old_ifs
+
+  printf '%s\n' "$install_dir"
+}
+
 resolved_version="$(resolve_version)"
 if [ -z "$resolved_version" ]; then
   echo "Failed to determine the latest release version." >&2
   exit 1
 fi
+
+install_dir="$(choose_install_dir)"
 
 archive="teams-migrator_${resolved_version}_${os}_${arch}.tar.gz"
 download_to="$tmpdir/$archive"

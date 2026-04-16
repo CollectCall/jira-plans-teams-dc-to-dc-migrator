@@ -38,6 +38,12 @@ func Run(args []string) int {
 			return ExitFailure
 		}
 		return ExitSuccess
+	case "uninstall":
+		if err := runUninstall(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return ExitFailure
+		}
+		return ExitSuccess
 	case "validate":
 		report = runValidate(cfg)
 	case "plan":

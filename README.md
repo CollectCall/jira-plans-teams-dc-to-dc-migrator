@@ -37,6 +37,7 @@ If none is available, it falls back to a user-local bin directory and tells you 
 - `config init`: interactive wizard to create or update a saved profile
 - `config path`: print the config file path in use
 - `config show`: print saved profile config, redacted by default
+- `uninstall`: remove the installed binary, optionally with `--purge-config`
 
 ## First Run
 
@@ -53,6 +54,18 @@ To update an installed binary to the latest published release:
 
 ```bash
 teams-migrator self-update
+```
+
+To uninstall the binary:
+
+```bash
+teams-migrator uninstall
+```
+
+To remove both the binary and the local config directory:
+
+```bash
+teams-migrator uninstall --purge-config
 ```
 
 Config defaults:

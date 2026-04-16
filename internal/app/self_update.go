@@ -41,7 +41,7 @@ func maybeOfferSelfUpdate(cfg Config) (bool, error) {
 	if cfg.NoInput || !isInteractiveTerminal() || currentVersion() == "" || currentVersion() == "dev" {
 		return false, nil
 	}
-	if cfg.Command == "version" || cfg.Command == "self-update" || boolEnv(envSkipUpdatePrompt, false) {
+	if cfg.Command == "version" || cfg.Command == "self-update" || cfg.Command == "uninstall" || boolEnv(envSkipUpdatePrompt, false) {
 		return false, nil
 	}
 

@@ -49,6 +49,7 @@ type Config struct {
 	DryRun              bool
 	Apply               bool
 	NoInput             bool
+	PurgeConfig         bool
 	ConfigPath          string
 	Profile             string
 	Redacted            bool
@@ -90,6 +91,7 @@ func parseConfig(args []string) (Config, error) {
 	fs.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "Preview mutating operations without sending writes")
 	fs.BoolVar(&cfg.Apply, "apply", false, "Execute mutating operations; overrides dry-run for migrate")
 	fs.BoolVar(&cfg.NoInput, "no-input", false, "Disable interactive prompts and require flags or environment variables")
+	fs.BoolVar(&cfg.PurgeConfig, "purge-config", false, "Remove the local config directory during uninstall")
 
 	if err := fs.Parse(remaining); err != nil {
 		return Config{}, err
@@ -108,7 +110,7 @@ func parseConfig(args []string) (Config, error) {
 		cfg.DryRun = false
 	}
 
-	if cfg.Command != "version" && cfg.Command != "self-update" {
+	if cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" {
 		store, err := loadProfileStore(cfg.ConfigPath)
 		if err != nil {
 			return Config{}, fmt.Errorf("loading config store: %w", err)
@@ -126,7 +128,7 @@ func parseConfig(args []string) (Config, error) {
 		cfg.Profile = selectedProfile
 	}
 
-	if cfg.Command != "config init" && cfg.Command != "config show" && cfg.Command != "config path" && cfg.Command != "version" && cfg.Command != "self-update" && !cfg.NoInput {
+	if cfg.Command != "config init" && cfg.Command != "config show" && cfg.Command != "config path" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" && !cfg.NoInput {
 		if err := completeConfigInteractively(&cfg); err != nil {
 			return Config{}, err
 		}
@@ -163,7 +165,7 @@ func (c Config) validate() error {
 	}
 
 	switch c.Command {
-	case "validate", "plan", "migrate", "report", "config init", "config show", "config path", "version", "self-update":
+	case "validate", "plan", "migrate", "report", "config init", "config show", "config path", "version", "self-update", "uninstall":
 	default:
 		return fmt.Errorf("unknown command %q", c.Command)
 	}

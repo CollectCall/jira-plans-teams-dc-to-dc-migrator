@@ -283,8 +283,10 @@ func sourceIssueClient(cfg Config) (*jiraClient, error) {
 
 func buildTeamMappings(cfg Config, sourceTeams, targetTeams []TeamDTO, sourcePlans []PlanDTO, planMappings []PlanMapping) ([]TeamMapping, []Finding) {
 	targetByTitle := map[string][]TeamDTO{}
+	targetByID := map[int64]TeamDTO{}
 	for _, team := range targetTeams {
 		targetByTitle[normalizeTitle(team.Title)] = append(targetByTitle[normalizeTitle(team.Title)], team)
+		targetByID[team.ID] = team
 	}
 
 	planTitlesByTeamID := map[int64][]string{}
@@ -313,6 +315,9 @@ func buildTeamMappings(cfg Config, sourceTeams, targetTeams []TeamDTO, sourcePla
 	mappings := make([]TeamMapping, 0, len(sourceTeams))
 	nextCreateOffset := 0
 	for _, source := range sourceTeams {
+		if target, ok := targetByID[source.ID]; ok && normalizeTitle(source.Title) != normalizeTitle(target.Title) {
+			findings = append(findings, newFinding(SeverityWarning, "team_id_title_mismatch", fmt.Sprintf("Source team %q (%d) has the same ID as destination team %q but a different title", source.Title, source.ID, target.Title)))
+		}
 		matches := targetByTitle[normalizeTitle(source.Title)]
 		planUsage := strings.Join(planTitlesByTeamID[source.ID], ", ")
 		scopeReason := teamScopeSkipReason(cfg.TeamScope, source.Shareable)

@@ -65,3 +65,20 @@ func TestParseConfigAcceptsTeamScope(t *testing.T) {
 		t.Fatalf("expected team scope non-shared-only, got %q", cfg.TeamScope)
 	}
 }
+
+func TestBuildTeamMappingsWarnsOnSameIDDifferentTitle(t *testing.T) {
+	cfg := Config{TeamScope: "all"}
+	sourceTeams := []TeamDTO{{ID: 10, Title: "Platform Team", Shareable: true}}
+	targetTeams := []TeamDTO{{ID: 10, Title: "Operations Team", Shareable: true}}
+
+	mappings, findings := buildTeamMappings(cfg, sourceTeams, targetTeams, nil, nil)
+	if len(mappings) != 1 {
+		t.Fatalf("expected 1 team mapping, got %d", len(mappings))
+	}
+	if got := mappings[0].Decision; got != "add" {
+		t.Fatalf("expected mapping to remain name-based and result in add, got %q", got)
+	}
+	if len(findings) != 1 || findings[0].Code != "team_id_title_mismatch" {
+		t.Fatalf("expected same-ID different-title warning, got %#v", findings)
+	}
+}

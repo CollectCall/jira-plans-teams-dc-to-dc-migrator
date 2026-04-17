@@ -137,7 +137,7 @@ func (c *jiraClient) ListFields() ([]JiraField, error) {
 	return fields, nil
 }
 
-func (c *jiraClient) SearchIssues(jql string, fields []string) ([]JiraIssue, error) {
+func (c *jiraClient) SearchIssues(jql string, fields []string, progress func(current, total int)) ([]JiraIssue, error) {
 	var all []JiraIssue
 	startAt := 0
 	for {
@@ -161,6 +161,9 @@ func (c *jiraClient) SearchIssues(jql string, fields []string) ([]JiraIssue, err
 		}
 		all = append(all, results.Issues...)
 		startAt += len(results.Issues)
+		if progress != nil {
+			progress(startAt, results.Total)
+		}
 		if startAt >= results.Total || len(results.Issues) < defaultPageSize {
 			break
 		}

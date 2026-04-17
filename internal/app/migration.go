@@ -245,9 +245,9 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	}
 	progress.End()
 
-	progress.Start("Exporting issues with team values")
+	progress.StartCount("Exporting issues with team values")
 	if sourceClient != nil {
-		selection, issueRows, issuePath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, sourceTeams)
+		selection, issueRows, issuePath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, sourceTeams, progress)
 		state.TeamsField = selection
 		state.IssueTeamRows = issueRows
 		if issuePath != "" {
@@ -298,7 +298,7 @@ func buildTeamMappings(sourceTeams, targetTeams []TeamDTO) []TeamMapping {
 				SourceShareable: source.Shareable,
 				TargetTeamID:    expectedSequentialID(len(targetTeams), nextCreateOffset),
 				TargetTitle:     source.Title,
-				Decision:        "create",
+				Decision:        "add",
 			})
 		case 1:
 			mappings = append(mappings, TeamMapping{
@@ -307,7 +307,7 @@ func buildTeamMappings(sourceTeams, targetTeams []TeamDTO) []TeamMapping {
 				SourceShareable: source.Shareable,
 				TargetTeamID:    strconv.FormatInt(matches[0].ID, 10),
 				TargetTitle:     matches[0].Title,
-				Decision:        "reuse",
+				Decision:        "merge",
 			})
 		default:
 			mappings = append(mappings, TeamMapping{
@@ -422,9 +422,9 @@ func planTeamActions(state migrationState) []Action {
 	for _, mapping := range state.TeamMappings {
 		status := "planned"
 		switch mapping.Decision {
-		case "reuse":
+		case "merge":
 			status = "reused"
-		case "create":
+		case "add":
 			status = "planned"
 		case "conflict":
 			status = "skipped"
@@ -468,10 +468,10 @@ func applyMigration(client *jiraClient, state *migrationState) ([]Action, []Find
 	for i := range state.TeamMappings {
 		mapping := &state.TeamMappings[i]
 		switch mapping.Decision {
-		case "reuse":
+		case "merge":
 			targetID, _ := strconv.ParseInt(mapping.TargetTeamID, 10, 64)
 			teamIDs[mapping.SourceTeamID] = targetID
-		case "create":
+		case "add":
 			createdID, err := client.CreateTeam(TeamDTO{Title: mapping.SourceTitle, Shareable: mapping.SourceShareable})
 			if err != nil {
 				findings = append(findings, newFinding(SeverityError, "team_create_failed", fmt.Sprintf("Creating team %s failed: %v", mapping.SourceTitle, err)))
@@ -901,7 +901,7 @@ func buildProgramMappings(sourcePrograms, targetPrograms []ProgramDTO) []Program
 				SourceOwner:     source.Owner,
 				TargetProgramID: expectedSequentialID(len(targetPrograms), nextCreateOffset),
 				TargetTitle:     source.Title,
-				Decision:        "create",
+				Decision:        "add",
 			})
 		case 1:
 			mappings = append(mappings, ProgramMapping{
@@ -910,7 +910,7 @@ func buildProgramMappings(sourcePrograms, targetPrograms []ProgramDTO) []Program
 				SourceOwner:     source.Owner,
 				TargetProgramID: strconv.FormatInt(matches[0].ID, 10),
 				TargetTitle:     matches[0].Title,
-				Decision:        "reuse",
+				Decision:        "merge",
 			})
 		default:
 			mappings = append(mappings, ProgramMapping{
@@ -976,7 +976,7 @@ func buildPlanMappings(sourcePlans, targetPlans []PlanDTO, programMappings []Pro
 			nextCreateOffset++
 			mapping.TargetPlanID = expectedSequentialID(len(targetPlans), nextCreateOffset)
 			mapping.TargetTitle = source.Title
-			mapping.Decision = "create"
+			mapping.Decision = "add"
 		case 1:
 			mapping.TargetPlanID = strconv.FormatInt(matches[0].ID, 10)
 			mapping.TargetTitle = matches[0].Title
@@ -984,7 +984,7 @@ func buildPlanMappings(sourcePlans, targetPlans []PlanDTO, programMappings []Pro
 			mapping.TargetProgramTitle = targetProgramTitles[matches[0].ProgramID]
 			mapping.TargetPlanTeamIDs = joinInt64s(matches[0].PlanTeams)
 			mapping.TargetPlanTeamTitles = joinMappedTitles(matches[0].PlanTeams, targetTeamTitles)
-			mapping.Decision = "reuse"
+			mapping.Decision = "merge"
 		default:
 			mapping.Decision = "conflict"
 			mapping.ConflictReason = "multiple destination plans match normalized title"
@@ -1195,14 +1195,14 @@ func writeEntityExports(cfg Config, state migrationState) ([]Artifact, error) {
 		return nil, err
 	}
 	if err := add("source_teams", "Source teams", "source-teams.pre-migration.csv",
-		[]string{"sourceTeamId", "title", "shareable"},
-		sourceTeamRows(state.SourceTeams),
+		[]string{"sourceTeamId", "title", "shareable", "planIds", "planTitles"},
+		sourceTeamRows(state.SourceTeams, state.SourcePlans),
 	); err != nil {
 		return nil, err
 	}
 	if err := add("destination_teams", "Destination teams", "destination-teams.pre-migration.csv",
-		[]string{"destinationTeamId", "title", "shareable"},
-		destinationTeamRows(state.TargetTeams),
+		[]string{"destinationTeamId", "title", "shareable", "planIds", "planTitles"},
+		destinationTeamRows(state.TargetTeams, state.TargetPlans),
 	); err != nil {
 		return nil, err
 	}
@@ -1366,25 +1366,33 @@ func planMappingRows(mappings []PlanMapping) [][]string {
 	return rows
 }
 
-func sourceTeamRows(teams []TeamDTO) [][]string {
-	rows := make([][]string, 0, len(teams))
-	for _, team := range teams {
-		rows = append(rows, []string{
-			strconv.FormatInt(team.ID, 10),
-			team.Title,
-			strconv.FormatBool(team.Shareable),
-		})
-	}
-	return rows
+func sourceTeamRows(teams []TeamDTO, plans []PlanDTO) [][]string {
+	return teamRowsWithPlanUsage(teams, plans)
 }
 
-func destinationTeamRows(teams []TeamDTO) [][]string {
+func destinationTeamRows(teams []TeamDTO, plans []PlanDTO) [][]string {
+	return teamRowsWithPlanUsage(teams, plans)
+}
+
+func teamRowsWithPlanUsage(teams []TeamDTO, plans []PlanDTO) [][]string {
+	planIDsByTeamID := map[int64][]string{}
+	planTitlesByTeamID := map[int64][]string{}
+	for _, plan := range plans {
+		planID := strconv.FormatInt(plan.ID, 10)
+		for _, teamID := range plan.PlanTeams {
+			planIDsByTeamID[teamID] = append(planIDsByTeamID[teamID], planID)
+			planTitlesByTeamID[teamID] = append(planTitlesByTeamID[teamID], plan.Title)
+		}
+	}
+
 	rows := make([][]string, 0, len(teams))
 	for _, team := range teams {
 		rows = append(rows, []string{
 			strconv.FormatInt(team.ID, 10),
 			team.Title,
 			strconv.FormatBool(team.Shareable),
+			strings.Join(planIDsByTeamID[team.ID], ","),
+			strings.Join(planTitlesByTeamID[team.ID], ","),
 		})
 	}
 	return rows
@@ -1531,7 +1539,7 @@ func defaultWeeklyHours(hours float64) float64 {
 	return hours
 }
 
-func exportIssuesWithTeamsField(cfg Config, client *jiraClient, sourceTeams []TeamDTO) (*TeamsFieldSelection, []IssueTeamRow, string, []Finding) {
+func exportIssuesWithTeamsField(cfg Config, client *jiraClient, sourceTeams []TeamDTO, progress *progressTracker) (*TeamsFieldSelection, []IssueTeamRow, string, []Finding) {
 	fields, err := client.ListFields()
 	if err != nil {
 		return nil, nil, "", []Finding{newFinding(SeverityWarning, "teams_field_discovery_failed", fmt.Sprintf("Could not load Jira fields: %v", err))}
@@ -1543,7 +1551,11 @@ func exportIssuesWithTeamsField(cfg Config, client *jiraClient, sourceTeams []Te
 	}
 
 	jql := fmt.Sprintf(`"%s" is not EMPTY`, selection.Field.Name)
-	issues, err := client.SearchIssues(jql, []string{"summary", "project", selection.Field.ID})
+	issues, err := client.SearchIssues(jql, []string{"summary", "project", selection.Field.ID}, func(current, total int) {
+		if progress != nil {
+			progress.UpdateCount(current, total)
+		}
+	})
 	if err != nil {
 		findings = append(findings, newFinding(SeverityWarning, "teams_field_issue_search_failed", fmt.Sprintf("Could not search issues for teams field %s: %v", selection.Field.ID, err)))
 		return selection, nil, "", findings

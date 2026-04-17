@@ -423,6 +423,18 @@ func buildResourcePlans(state migrationState) ([]ResourcePlan, []Finding) {
 		}
 		targetUserByEmail[strings.ToLower(strings.TrimSpace(person.JiraUser.Email))] = person.JiraUser.JiraUserID
 	}
+	existingMemberships := map[string]struct{}{}
+	targetPersonByID := map[int64]PersonDTO{}
+	for _, person := range state.TargetPersons {
+		targetPersonByID[person.ID] = person
+	}
+	for _, resource := range state.TargetResources {
+		_, _, userID := resourcePersonDetails(resource, targetPersonByID)
+		if userID == "" {
+			continue
+		}
+		existingMemberships[fmt.Sprintf("%d:%s", resource.TeamID, userID)] = struct{}{}
+	}
 
 	mappingsBySourceTeam := map[int64]TeamMapping{}
 	for _, mapping := range state.TeamMappings {
@@ -498,6 +510,13 @@ func buildResourcePlans(state migrationState) ([]ResourcePlan, []Finding) {
 		}
 
 		plan.TargetUserID = targetUserID
+		if _, exists := existingMemberships[fmt.Sprintf("%s:%s", plan.TargetTeamID, plan.TargetUserID)]; exists {
+			plan.Status = "skipped"
+			plan.Reason = "destination membership already exists"
+			plans = append(plans, plan)
+			findings = append(findings, newFinding(SeverityInfo, "destination_membership_exists", fmt.Sprintf("Skipping resource %d because %s is already a member of destination team %s", resource.ID, targetEmail, plan.TargetTeamName)))
+			continue
+		}
 		plans = append(plans, plan)
 	}
 	return plans, findings

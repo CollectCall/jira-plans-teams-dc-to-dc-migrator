@@ -82,3 +82,43 @@ func TestBuildTeamMappingsWarnsOnSameIDDifferentTitle(t *testing.T) {
 		t.Fatalf("expected same-ID different-title warning, got %#v", findings)
 	}
 }
+
+func TestBuildResourcePlansSkipsExistingDestinationMembership(t *testing.T) {
+	state := migrationState{
+		IdentityMappings: IdentityMapping{
+			"alice@example.com": "alice@example.com",
+		},
+		SourceTeams: []TeamDTO{
+			{ID: 10, Title: "Source Team", Shareable: true},
+		},
+		SourcePersons: []PersonDTO{
+			{ID: 100, JiraUser: &JiraUserDTO{Email: "alice@example.com"}},
+		},
+		SourceResources: []ResourceDTO{
+			{ID: 500, TeamID: 10, WeeklyHours: 40, Person: &PersonDTO{ID: 100}},
+		},
+		TargetPersons: []PersonDTO{
+			{ID: 200, JiraUser: &JiraUserDTO{Email: "alice@example.com", JiraUserID: "user-1"}},
+		},
+		TargetResources: []ResourceDTO{
+			{ID: 900, TeamID: 20, WeeklyHours: 40, Person: &PersonDTO{ID: 200}},
+		},
+		TeamMappings: []TeamMapping{
+			{SourceTeamID: 10, SourceTitle: "Source Team", TargetTeamID: "20", TargetTitle: "Target Team", Decision: "merge"},
+		},
+	}
+
+	plans, findings := buildResourcePlans(state)
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 resource plan, got %d", len(plans))
+	}
+	if plans[0].Status != "skipped" {
+		t.Fatalf("expected existing destination membership to be skipped, got %q", plans[0].Status)
+	}
+	if plans[0].Reason != "destination membership already exists" {
+		t.Fatalf("unexpected skip reason: %q", plans[0].Reason)
+	}
+	if len(findings) != 1 || findings[0].Code != "destination_membership_exists" {
+		t.Fatalf("expected destination membership info finding, got %#v", findings)
+	}
+}

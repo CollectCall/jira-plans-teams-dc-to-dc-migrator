@@ -48,6 +48,7 @@ If none is available, it falls back to a user-local bin directory and tells you 
 - `validate`: validate configuration and local inputs
 - `plan`: generate a migration plan report
 - `migrate`: run a dry-run by default, or switch to apply mode with `--apply`
+- `scan-filters`: scan Jira filters for `Team = {id|name}` JQL clauses that match known source teams
 - `report`: re-render a previously generated JSON report as JSON or CSV
 - `config init`: interactive wizard to create or update a saved profile
 - `config path`: print the config file path in use
@@ -60,10 +61,12 @@ If none is available, it falls back to a user-local bin directory and tells you 
 teams-migrator config init
 teams-migrator validate
 teams-migrator plan --profile default
+teams-migrator scan-filters --profile default
 teams-migrator migrate --profile default --apply
 ```
 
 The CLI is interactive by default when run in a terminal. If required inputs or secrets are missing, it prompts for them.
+During interactive `validate`, `plan`, and `migrate` runs it also asks whether filters should be scanned; the default is `no`.
 
 To update an installed binary to the latest published release:
 
@@ -107,5 +110,17 @@ teams-migrator migrate \
   --identity-mapping ./identity-mapping.csv \
   --apply
 ```
+
+### Filter scan POC
+```bash
+teams-migrator scan-filters \
+  --source-base-url https://source.example.com/jira \
+  --source-username "$SOURCE_USERNAME" \
+  --source-password "$SOURCE_PASSWORD" \
+  --teams-file ./teams.json
+```
+
+The filter scan currently performs a proof-of-concept inventory pass against Jira's filter REST API and exports filters whose JQL contains a `Team = ...` clause matching a known source team ID or team name.
+It only scans filters visible to the authenticated user, so production coverage depends on the permissions of the account used for the scan.
 
 The CLI uses basic auth for Jira API access. When credentials are not supplied through flags or environment variables, it prompts for them at runtime and does not store them in the profile.

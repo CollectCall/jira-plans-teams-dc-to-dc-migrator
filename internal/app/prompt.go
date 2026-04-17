@@ -201,6 +201,21 @@ func completeConfigInteractively(cfg *Config) error {
 		cfg.TeamScope = value
 	}
 
+	if !cfg.ScanFiltersExplicit {
+		value, err := wizard.choice(wizardField{
+			Label:        "Scan filters as well",
+			Description:  "Choose whether this run should also scan visible Jira filters for JQL clauses like Team = 123 or Team = \"Platform Team\".",
+			InputHelp:    "Type the number of your choice and press Enter.",
+			ArtifactInfo: "This is an extra source-side inventory pass. It can help find filter JQL that must be updated later, but it adds latency to the run.",
+			Default:      "no",
+		}, []string{"no", "yes"})
+		if err != nil {
+			return err
+		}
+		cfg.ScanFilters = value == "yes"
+		cfg.ScanFiltersExplicit = true
+	}
+
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 var errUsage = errors.New("usage")
@@ -54,7 +55,7 @@ func Run(args []string) int {
 			_, previewFindings, previewActions := executeMigrationWithState(cfg, false, state, findings)
 			preview := populateExecutionReport(newReport(cfg), state, previewFindings, previewActions, "apply_preview", "Preview generated before apply mode confirmation")
 			preview.DryRun = true
-			printSummary(os.Stdout, preview, "")
+			printSummary(os.Stdout, preview, nil)
 			ok, err := confirmApplyAfterPreview()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -71,6 +72,8 @@ func Run(args []string) int {
 			break
 		}
 		report = runMigrate(cfg)
+	case "scan-filters":
+		report = runScanFilters(cfg)
 	case "report":
 		report, err = runReport(cfg)
 		if err != nil {
@@ -97,19 +100,34 @@ func Run(args []string) int {
 		return ExitFailure
 	}
 
-	reportPath := ""
+	var reportPaths []string
 	if cfg.Command != "report" {
 		if err := ensureOutputDir(cfg.OutputDir); err != nil {
 			fmt.Fprintf(os.Stderr, "error: creating output directory: %v\n", err)
 			return ExitFailure
 		}
-		reportPath = defaultOutputPath(cfg)
-		if err := writeReport(report, cfg.ReportFormat, reportPath); err != nil {
-			fmt.Fprintf(os.Stderr, "error: writing report: %v\n", err)
+		reportBase := strings.ReplaceAll(cfg.Command, " ", "-")
+		jsonPath := defaultOutputPathForFormat(cfg, ReportFormatJSON)
+		if err := writeReport(report, ReportFormatJSON, jsonPath); err != nil {
+			fmt.Fprintf(os.Stderr, "error: writing json report: %v\n", err)
 			return ExitFailure
 		}
+		if err := pruneOutputFamily(cfg.OutputDir, fmt.Sprintf("%s-report.%s", reportBase, ReportFormatJSON), outputRetentionLimit); err != nil {
+			fmt.Fprintf(os.Stderr, "error: pruning json reports: %v\n", err)
+			return ExitFailure
+		}
+		csvPath := defaultOutputPathForFormat(cfg, ReportFormatCSV)
+		if err := writeReport(report, ReportFormatCSV, csvPath); err != nil {
+			fmt.Fprintf(os.Stderr, "error: writing csv report: %v\n", err)
+			return ExitFailure
+		}
+		if err := pruneOutputFamily(cfg.OutputDir, fmt.Sprintf("%s-report.%s", reportBase, ReportFormatCSV), outputRetentionLimit); err != nil {
+			fmt.Fprintf(os.Stderr, "error: pruning csv reports: %v\n", err)
+			return ExitFailure
+		}
+		reportPaths = []string{jsonPath, csvPath}
 	}
 
-	printSummary(os.Stdout, report, reportPath)
+	printSummary(os.Stdout, report, reportPaths)
 	return exitCodeFor(report)
 }

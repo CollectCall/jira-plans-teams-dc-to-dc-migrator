@@ -50,6 +50,7 @@ type InputFiles struct {
 	Resources       string `json:"resources,omitempty"`
 	IssuesCSV       string `json:"issuesCsv,omitempty"`
 	TeamScope       string `json:"teamScope,omitempty"`
+	ScanFilters     bool   `json:"scanFilters,omitempty"`
 }
 
 type Action struct {

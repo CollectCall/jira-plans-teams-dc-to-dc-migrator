@@ -24,7 +24,7 @@ type PersonDTO struct {
 
 type ResourceDTO struct {
 	ID          int64      `json:"id"`
-	WeeklyHours float64    `json:"weeklyHours,omitempty"`
+	WeeklyHours *float64   `json:"weeklyHours,omitempty"`
 	JoinDate    int64      `json:"joinDate,omitempty"`
 	LeaveDate   int64      `json:"leaveDate,omitempty"`
 	TeamID      int64      `json:"teamId"`
@@ -97,18 +97,18 @@ type TeamMapping struct {
 }
 
 type ResourcePlan struct {
-	SourceResourceID int64   `json:"sourceResourceId"`
-	SourceTeamID     int64   `json:"sourceTeamId"`
-	SourceTeamName   string  `json:"sourceTeamName,omitempty"`
-	SourcePersonID   int64   `json:"sourcePersonId"`
-	SourceEmail      string  `json:"sourceEmail,omitempty"`
-	TargetEmail      string  `json:"targetEmail,omitempty"`
-	TargetTeamID     string  `json:"targetTeamId,omitempty"`
-	TargetTeamName   string  `json:"targetTeamName,omitempty"`
-	TargetUserID     string  `json:"targetUserId,omitempty"`
-	WeeklyHours      float64 `json:"weeklyHours"`
-	Status           string  `json:"status"`
-	Reason           string  `json:"reason,omitempty"`
+	SourceResourceID int64    `json:"sourceResourceId"`
+	SourceTeamID     int64    `json:"sourceTeamId"`
+	SourceTeamName   string   `json:"sourceTeamName,omitempty"`
+	SourcePersonID   int64    `json:"sourcePersonId"`
+	SourceEmail      string   `json:"sourceEmail,omitempty"`
+	TargetEmail      string   `json:"targetEmail,omitempty"`
+	TargetTeamID     string   `json:"targetTeamId,omitempty"`
+	TargetTeamName   string   `json:"targetTeamName,omitempty"`
+	TargetUserID     string   `json:"targetUserId,omitempty"`
+	WeeklyHours      *float64 `json:"weeklyHours,omitempty"`
+	Status           string   `json:"status"`
+	Reason           string   `json:"reason,omitempty"`
 }
 
 type JiraField struct {
@@ -131,6 +131,29 @@ type JiraSearchResults struct {
 	MaxResults int         `json:"maxResults"`
 	Total      int         `json:"total"`
 	Issues     []JiraIssue `json:"issues"`
+}
+
+type JiraFilterSearchResults struct {
+	StartAt    int          `json:"startAt"`
+	MaxResults int          `json:"maxResults"`
+	Total      int          `json:"total"`
+	Values     []JiraFilter `json:"values"`
+}
+
+type JiraFilter struct {
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	JQL         string          `json:"jql,omitempty"`
+	Owner       *JiraFilterUser `json:"owner,omitempty"`
+	ViewURL     string          `json:"viewUrl,omitempty"`
+	SearchURL   string          `json:"searchUrl,omitempty"`
+}
+
+type JiraFilterUser struct {
+	Name        string `json:"name,omitempty"`
+	Key         string `json:"key,omitempty"`
+	DisplayName string `json:"displayName,omitempty"`
 }
 
 type JiraIssue struct {
@@ -157,9 +180,22 @@ type TeamsFieldSelection struct {
 type IssueTeamRow struct {
 	IssueKey        string `json:"issueKey"`
 	ProjectKey      string `json:"projectKey,omitempty"`
+	ProjectName     string `json:"projectName,omitempty"`
+	ProjectType     string `json:"projectType,omitempty"`
 	Summary         string `json:"summary,omitempty"`
 	TeamsFieldID    string `json:"teamsFieldId"`
-	TeamsFieldName  string `json:"teamsFieldName"`
 	SourceTeamIDs   string `json:"sourceTeamIds"`
 	SourceTeamNames string `json:"sourceTeamNames"`
+}
+
+type FilterTeamClauseRow struct {
+	FilterID       string `json:"filterId"`
+	FilterName     string `json:"filterName"`
+	Owner          string `json:"owner,omitempty"`
+	MatchType      string `json:"matchType"`
+	ClauseValue    string `json:"clauseValue"`
+	SourceTeamID   string `json:"sourceTeamId,omitempty"`
+	SourceTeamName string `json:"sourceTeamName,omitempty"`
+	Clause         string `json:"clause"`
+	JQL            string `json:"jql"`
 }

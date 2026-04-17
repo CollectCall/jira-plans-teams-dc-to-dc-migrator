@@ -6,8 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -25,6 +25,7 @@ const (
 	envOutputDir       = "TEAMS_MIGRATOR_OUTPUT_DIR"
 	envReportFormat    = "TEAMS_MIGRATOR_REPORT_FORMAT"
 	envTeamScope       = "TEAMS_MIGRATOR_TEAM_SCOPE"
+	envScanFilters     = "TEAMS_MIGRATOR_SCAN_FILTERS"
 	envStrict          = "TEAMS_MIGRATOR_STRICT"
 	envDryRun          = "TEAMS_MIGRATOR_DRY_RUN"
 	envReportInput     = "TEAMS_MIGRATOR_REPORT_INPUT"
@@ -47,6 +48,8 @@ type Config struct {
 	ReportInput         string
 	ReportFormat        ReportFormat
 	TeamScope           string
+	ScanFilters         bool
+	ScanFiltersExplicit bool
 	Strict              bool
 	DryRun              bool
 	Apply               bool
@@ -54,6 +57,7 @@ type Config struct {
 	ConfigPath          string
 	Profile             string
 	Redacted            bool
+	OutputTimestamp     string
 }
 
 func parseConfig(args []string) (Config, error) {
@@ -83,6 +87,9 @@ func parseConfig(args []string) (Config, error) {
 	fs.StringVar(&cfg.Profile, "profile", envValue(envProfile), "Saved profile name from config.yaml")
 	fs.BoolVar(&cfg.Redacted, "redacted", true, "Redact secrets in config show output")
 	fs.StringVar(&cfg.TeamScope, "team-scope", envValue(envTeamScope), "Team migration scope: all, shared-only, or non-shared-only")
+	cfg.ScanFilters = boolEnv(envScanFilters, false)
+	fs.BoolVar(&cfg.ScanFilters, "scan-filters", cfg.ScanFilters, "Scan Jira filters for Team = {id|name} clauses during the run")
+	cfg.ScanFiltersExplicit = envIsSet(envScanFilters) || boolFlagProvided(remaining, "--scan-filters")
 
 	reportFormat := envValue(envReportFormat)
 	fs.StringVar(&reportFormat, "format", reportFormat, "Report format: json or csv")
@@ -106,6 +113,9 @@ func parseConfig(args []string) (Config, error) {
 	}
 	if cfg.OutputDir == "" {
 		cfg.OutputDir = "out"
+	}
+	if cfg.OutputTimestamp == "" {
+		cfg.OutputTimestamp = time.Now().Format("20060102-150405")
 	}
 	if cfg.Apply {
 		cfg.DryRun = false
@@ -172,7 +182,7 @@ func (c Config) validate() error {
 	}
 
 	switch c.Command {
-	case "validate", "plan", "migrate", "report", "config init", "config show", "config path", "version", "self-update", "uninstall":
+	case "validate", "plan", "migrate", "scan-filters", "report", "config init", "config show", "config path", "version", "self-update", "uninstall":
 	default:
 		return fmt.Errorf("unknown command %q", c.Command)
 	}
@@ -209,6 +219,9 @@ func (c Config) requireCoreInputs() []Finding {
 	if c.TargetBaseURL == "" {
 		findings = append(findings, newFinding(SeverityWarning, "missing_target_base_url", "Target Jira base URL was not provided"))
 	}
+	if c.ScanFilters && c.SourceBaseURL == "" {
+		findings = append(findings, newFinding(SeverityError, "missing_source_base_url_for_filter_scan", "Filter scan requires a source Jira base URL"))
+	}
 
 	for _, path := range []struct {
 		label string
@@ -231,6 +244,22 @@ func (c Config) requireCoreInputs() []Finding {
 
 	if c.IdentityMappingFile != "" {
 		findings = append(findings, validateIdentityMappingFile(c.IdentityMappingFile)...)
+	}
+
+	return findings
+}
+
+func (c Config) requireFilterScanInputs() []Finding {
+	var findings []Finding
+
+	if strings.TrimSpace(c.SourceBaseURL) == "" {
+		findings = append(findings, newFinding(SeverityError, "missing_source_base_url", "Source Jira base URL is required for filter scanning"))
+	}
+
+	if c.TeamsFile != "" {
+		if _, err := os.Stat(c.TeamsFile); err != nil {
+			findings = append(findings, newFinding(SeverityError, "missing_file", fmt.Sprintf("teams export file not found: %s", c.TeamsFile)))
+		}
 	}
 
 	return findings
@@ -283,6 +312,20 @@ func boolEnv(key string, fallback bool) bool {
 	}
 }
 
+func envIsSet(key string) bool {
+	_, ok := os.LookupEnv(key)
+	return ok
+}
+
+func boolFlagProvided(args []string, name string) bool {
+	for _, arg := range args {
+		if arg == name || strings.HasPrefix(arg, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
 func ensureOutputDir(path string) error {
 	if path == "" {
 		return nil
@@ -292,5 +335,10 @@ func ensureOutputDir(path string) error {
 
 func defaultOutputPath(cfg Config) string {
 	ext := string(cfg.ReportFormat)
-	return filepath.Join(cfg.OutputDir, fmt.Sprintf("%s-report.%s", strings.ReplaceAll(cfg.Command, " ", "-"), ext))
+	return outputPathForName(cfg, fmt.Sprintf("%s-report.%s", strings.ReplaceAll(cfg.Command, " ", "-"), ext))
+}
+
+func defaultOutputPathForFormat(cfg Config, format ReportFormat) string {
+	ext := string(format)
+	return outputPathForName(cfg, fmt.Sprintf("%s-report.%s", strings.ReplaceAll(cfg.Command, " ", "-"), ext))
 }

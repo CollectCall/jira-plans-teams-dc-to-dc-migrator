@@ -63,14 +63,16 @@ func writeCSVReport(w io.Writer, report Report) error {
 	return writer.Error()
 }
 
-func printSummary(w io.Writer, report Report, reportPath string) {
+func printSummary(w io.Writer, report Report, reportPaths []string) {
 	theme := currentUITheme()
 	fmt.Fprintf(w, "%s\n", theme.style(summaryTitle(report), theme.titleColor))
 	fmt.Fprintf(w, "%s %s\n", theme.style("Mode:", theme.labelColor), summaryMode(report))
 	fmt.Fprintf(w, "%s %s\n", theme.style("Source:", theme.labelColor), summaryEndpoint(report.Source))
 	fmt.Fprintf(w, "%s %s\n", theme.style("Target:", theme.labelColor), summaryEndpoint(report.Target))
-	if reportPath != "" {
-		fmt.Fprintf(w, "%s %s\n", theme.style("Report:", theme.labelColor), reportPath)
+	if len(reportPaths) == 1 {
+		fmt.Fprintf(w, "%s %s\n", theme.style("Report:", theme.labelColor), reportPaths[0])
+	} else if len(reportPaths) > 1 {
+		fmt.Fprintf(w, "%s %s\n", theme.style("Reports:", theme.labelColor), strings.Join(reportPaths, ", "))
 	}
 
 	artifactLines := summaryArtifacts(report)
@@ -142,6 +144,8 @@ func summaryTitle(report Report) string {
 			return "Migration dry run completed"
 		}
 		return "Migration run completed"
+	case "scan-filters":
+		return "Filter scan completed"
 	case "report":
 		return "Report exported"
 	default:
@@ -313,6 +317,9 @@ func summaryPreviews(report Report) []previewSection {
 	if rows := issuePreviewRows(imd["issues"]); len(rows) > 0 {
 		sections = append(sections, previewSection{Title: "Issues With Team Values Preview", Lines: rows})
 	}
+	if rows := filterPreviewRows(imd["filters"]); len(rows) > 0 {
+		sections = append(sections, previewSection{Title: "Filters With Team Clauses Preview", Lines: rows})
+	}
 	return sections
 }
 
@@ -366,6 +373,17 @@ func issuePreviewRows(value any) []string {
 		return limitLines(formatIssueRows(rows))
 	case []any:
 		return limitLines(formatIssueRowMaps(rows))
+	default:
+		return nil
+	}
+}
+
+func filterPreviewRows(value any) []string {
+	switch rows := value.(type) {
+	case []FilterTeamClauseRow:
+		return limitLines(formatFilterTeamClauseRows(rows))
+	case []any:
+		return limitLines(formatFilterTeamClauseMaps(rows))
 	default:
 		return nil
 	}
@@ -459,7 +477,11 @@ func formatResourcePlans(rows []ResourcePlan) []string {
 		if person == "" {
 			person = fmt.Sprintf("person:%d", row.SourcePersonID)
 		}
-		lines = append(lines, fmt.Sprintf("- %s / %s -> %s / %s (%s)", row.SourceTeamName, person, row.TargetTeamName, row.TargetUserID, row.Status))
+		line := fmt.Sprintf("- %s / %s -> %s / %s (%s)", row.SourceTeamName, person, row.TargetTeamName, row.TargetUserID, row.Status)
+		if row.WeeklyHours != nil {
+			line = fmt.Sprintf("%s weeklyHours=%s", line, formatWeeklyHours(row.WeeklyHours))
+		}
+		lines = append(lines, line)
 	}
 	return lines
 }
@@ -475,13 +497,17 @@ func formatResourcePlanMaps(rows []any) []string {
 		if person == "" {
 			person = fmt.Sprintf("person:%s", asString(row["sourcePersonId"]))
 		}
-		lines = append(lines, fmt.Sprintf("- %s / %s -> %s / %s (%s)",
+		line := fmt.Sprintf("- %s / %s -> %s / %s (%s)",
 			asString(row["sourceTeamName"]),
 			person,
 			asString(row["targetTeamName"]),
 			asString(row["targetUserId"]),
 			asString(row["status"]),
-		))
+		)
+		if weeklyHours := asString(row["weeklyHours"]); weeklyHours != "" {
+			line = fmt.Sprintf("%s weeklyHours=%s", line, weeklyHours)
+		}
+		lines = append(lines, line)
 	}
 	return lines
 }
@@ -505,6 +531,31 @@ func formatIssueRowMaps(rows []any) []string {
 			asString(row["issueKey"]),
 			asString(row["summary"]),
 			asString(row["sourceTeamNames"]),
+		))
+	}
+	return lines
+}
+
+func formatFilterTeamClauseRows(rows []FilterTeamClauseRow) []string {
+	lines := []string{}
+	for _, row := range rows {
+		lines = append(lines, fmt.Sprintf("- %s [%s]: %s -> %s", row.FilterName, row.FilterID, row.Clause, labelWithID(row.SourceTeamName, row.SourceTeamID)))
+	}
+	return lines
+}
+
+func formatFilterTeamClauseMaps(rows []any) []string {
+	lines := []string{}
+	for _, item := range rows {
+		row, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- %s [%s]: %s -> %s",
+			asString(row["filterName"]),
+			asString(row["filterId"]),
+			asString(row["clause"]),
+			labelWithID(asString(row["sourceTeamName"]), asString(row["sourceTeamId"])),
 		))
 	}
 	return lines
@@ -584,7 +635,7 @@ func exitCodeFor(report Report) int {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: teams-migrator <validate|plan|migrate|report|version|self-update|uninstall> [flags]")
+	fmt.Fprintln(w, "Usage: teams-migrator <validate|plan|migrate|scan-filters|report|version|self-update|uninstall> [flags]")
 	fmt.Fprintln(w, "       teams-migrator config <init|show|path> [flags]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")
@@ -602,6 +653,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --output-dir            Directory for generated reports")
 	fmt.Fprintln(w, "  --format                Report output: json or csv")
 	fmt.Fprintln(w, "  --team-scope            Team migration scope: all, shared-only, or non-shared-only")
+	fmt.Fprintln(w, "  --scan-filters          Scan visible Jira filters for Team = {id|name} clauses")
 	fmt.Fprintln(w, "  --config                Path to config.yaml profile store")
 	fmt.Fprintln(w, "  --profile               Saved profile name")
 	fmt.Fprintln(w, "  --redacted              Kept for compatibility; config show no longer reads secrets from YAML")
@@ -626,6 +678,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_OUTPUT_DIR")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_REPORT_FORMAT")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_TEAM_SCOPE")
+	fmt.Fprintln(w, "  TEAMS_MIGRATOR_SCAN_FILTERS")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_STRICT")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_DRY_RUN")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_REPORT_INPUT")

@@ -54,12 +54,12 @@ func normalizeAPIBaseURL(raw string) string {
 	return trimmed + "/rest/teams-api/1.0"
 }
 
-func (c *jiraClient) ListTeams() ([]TeamDTO, error) {
-	return listPaged[TeamDTO](c, "/team")
+func (c *jiraClient) ListTeams(progress func(current, total int)) ([]TeamDTO, error) {
+	return listPaged[TeamDTO](c, "/team", progress)
 }
 
-func (c *jiraClient) ListPersons() ([]PersonDTO, error) {
-	return listPaged[PersonDTO](c, "/person")
+func (c *jiraClient) ListPersons(progress func(current, total int)) ([]PersonDTO, error) {
+	return listPaged[PersonDTO](c, "/person", progress)
 }
 
 func (c *jiraClient) GetPerson(id int64) (*PersonDTO, error) {
@@ -74,16 +74,16 @@ func (c *jiraClient) GetPerson(id int64) (*PersonDTO, error) {
 	return &person, nil
 }
 
-func (c *jiraClient) ListResources() ([]ResourceDTO, error) {
-	return listPaged[ResourceDTO](c, "/resource")
+func (c *jiraClient) ListResources(progress func(current, total int)) ([]ResourceDTO, error) {
+	return listPaged[ResourceDTO](c, "/resource", progress)
 }
 
-func (c *jiraClient) ListPrograms() ([]ProgramDTO, error) {
-	return listJPOPaged[ProgramDTO](c, "/program")
+func (c *jiraClient) ListPrograms(progress func(current, total int)) ([]ProgramDTO, error) {
+	return listJPOPaged[ProgramDTO](c, "/program", progress)
 }
 
-func (c *jiraClient) ListPlans() ([]PlanDTO, error) {
-	return listJPOPaged[PlanDTO](c, "/plan")
+func (c *jiraClient) ListPlans(progress func(current, total int)) ([]PlanDTO, error) {
+	return listJPOPaged[PlanDTO](c, "/plan", progress)
 }
 
 func (c *jiraClient) CreateTeam(team TeamDTO) (int64, error) {
@@ -94,24 +94,10 @@ func (c *jiraClient) CreateTeam(team TeamDTO) (int64, error) {
 	return c.postForID("/team", payload)
 }
 
-func (c *jiraClient) CreateResource(teamID int64, jiraUserID string, weeklyHours float64) (int64, error) {
+func (c *jiraClient) CreateResource(teamID int64, jiraUserID string, weeklyHours *float64) (int64, error) {
 	candidates := []map[string]any{
-		{
-			"teamId":      teamID,
-			"weeklyHours": weeklyHours,
-			"person": map[string]any{
-				"jiraUserId": jiraUserID,
-			},
-		},
-		{
-			"teamId":      teamID,
-			"weeklyHours": weeklyHours,
-			"person": map[string]any{
-				"jiraUser": map[string]any{
-					"jiraUserId": jiraUserID,
-				},
-			},
-		},
+		createResourcePayload(teamID, jiraUserID, weeklyHours, false),
+		createResourcePayload(teamID, jiraUserID, weeklyHours, true),
 	}
 
 	var lastErr error
@@ -123,6 +109,27 @@ func (c *jiraClient) CreateResource(teamID int64, jiraUserID string, weeklyHours
 		lastErr = err
 	}
 	return 0, lastErr
+}
+
+func createResourcePayload(teamID int64, jiraUserID string, weeklyHours *float64, nestedPerson bool) map[string]any {
+	payload := map[string]any{
+		"teamId": teamID,
+	}
+	if weeklyHours != nil {
+		payload["weeklyHours"] = *weeklyHours
+	}
+	if nestedPerson {
+		payload["person"] = map[string]any{
+			"jiraUser": map[string]any{
+				"jiraUserId": jiraUserID,
+			},
+		}
+	} else {
+		payload["person"] = map[string]any{
+			"jiraUserId": jiraUserID,
+		}
+	}
+	return payload
 }
 
 func (c *jiraClient) ListFields() ([]JiraField, error) {
@@ -171,6 +178,24 @@ func (c *jiraClient) SearchIssues(jql string, fields []string, progress func(cur
 	return all, nil
 }
 
+func (c *jiraClient) SearchFilters(startAt, maxResults int) (JiraFilterSearchResults, error) {
+	query := url.Values{}
+	query.Set("expand", "jql,owner")
+	query.Set("startAt", strconv.Itoa(startAt))
+	query.Set("maxResults", strconv.Itoa(maxResults))
+
+	body, err := c.doCoreJSON(http.MethodGet, "/rest/api/2/filter/search", query, nil)
+	if err != nil {
+		return JiraFilterSearchResults{}, err
+	}
+
+	var results JiraFilterSearchResults
+	if err := json.Unmarshal(body, &results); err != nil {
+		return JiraFilterSearchResults{}, err
+	}
+	return results, nil
+}
+
 func (c *jiraClient) SearchCoreUsers(queryText string) ([]CoreJiraUser, error) {
 	query := url.Values{}
 	query.Set("username", strings.TrimSpace(queryText))
@@ -189,7 +214,7 @@ func (c *jiraClient) SearchCoreUsers(queryText string) ([]CoreJiraUser, error) {
 	return users, nil
 }
 
-func listPaged[T any](c *jiraClient, endpoint string) ([]T, error) {
+func listPaged[T any](c *jiraClient, endpoint string, progress func(current, total int)) ([]T, error) {
 	var all []T
 	for page := 1; ; page++ {
 		query := url.Values{}
@@ -208,6 +233,13 @@ func listPaged[T any](c *jiraClient, endpoint string) ([]T, error) {
 			break
 		}
 		all = append(all, items...)
+		if progress != nil {
+			total := len(all)
+			if len(items) == teamsAPIMaxPageSize {
+				total = len(all) + 1
+			}
+			progress(len(all), total)
+		}
 		if len(items) < teamsAPIMaxPageSize {
 			break
 		}
@@ -283,7 +315,7 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 	return data, nil
 }
 
-func listJPOPaged[T any](c *jiraClient, endpoint string) ([]T, error) {
+func listJPOPaged[T any](c *jiraClient, endpoint string, progress func(current, total int)) ([]T, error) {
 	var all []T
 	for page := 1; ; page++ {
 		query := url.Values{}
@@ -302,6 +334,13 @@ func listJPOPaged[T any](c *jiraClient, endpoint string) ([]T, error) {
 			break
 		}
 		all = append(all, items...)
+		if progress != nil {
+			total := len(all)
+			if len(items) == jpoAPIMaxPageSize {
+				total = len(all) + 1
+			}
+			progress(len(all), total)
+		}
 		if len(items) < jpoAPIMaxPageSize {
 			break
 		}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,26 +12,29 @@ import (
 )
 
 type migrationState struct {
-	IdentityMappings     IdentityMapping
-	SourcePrograms       []ProgramDTO
-	TargetPrograms       []ProgramDTO
-	ProgramMappings      []ProgramMapping
-	SourcePlans          []PlanDTO
-	TargetPlans          []PlanDTO
-	PlanMappings         []PlanMapping
-	SourceTeams          []TeamDTO
-	SourcePersons        []PersonDTO
-	SourceResources      []ResourceDTO
-	TargetTeams          []TeamDTO
-	TargetPersons        []PersonDTO
-	TargetResources      []ResourceDTO
-	TeamMappings         []TeamMapping
-	ResourcePlans        []ResourcePlan
-	TeamsField           *TeamsFieldSelection
-	IssueTeamRows        []IssueTeamRow
-	IssueExportPath      string
-	MembershipExportPath string
-	Artifacts            []Artifact
+	IdentityMappings      IdentityMapping
+	SourcePrograms        []ProgramDTO
+	TargetPrograms        []ProgramDTO
+	ProgramMappings       []ProgramMapping
+	SourcePlans           []PlanDTO
+	TargetPlans           []PlanDTO
+	PlanMappings          []PlanMapping
+	SourceTeams           []TeamDTO
+	SourcePersons         []PersonDTO
+	SourceResources       []ResourceDTO
+	TargetTeams           []TeamDTO
+	TargetPersons         []PersonDTO
+	TargetResources       []ResourceDTO
+	TeamMappings          []TeamMapping
+	ResourcePlans         []ResourcePlan
+	TeamsField            *TeamsFieldSelection
+	IssueTeamRows         []IssueTeamRow
+	FilterTeamClauseRows  []FilterTeamClauseRow
+	IssueExportPath       string
+	IssueImportExportPath string
+	MembershipExportPath  string
+	FilterScanExportPath  string
+	Artifacts             []Artifact
 }
 
 func executeMigration(cfg Config, apply bool) (migrationState, []Finding, []Action) {
@@ -80,13 +82,14 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 
 func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	var findings []Finding
-	progress := newProgressTracker(6)
+	progressTotal := 16
+	if cfg.ScanFilters {
+		progressTotal++
+	}
+	progress := newProgressTracker(progressTotal)
 	defer progress.Finish()
-
-	progress.Start("Loading source and target datasets")
 	mapping, err := loadIdentityMappings(cfg.IdentityMappingFile)
 	if err != nil {
-		progress.End()
 		findings = append(findings, newFinding(SeverityError, "identity_mapping_load", err.Error()))
 		return migrationState{}, findings
 	}
@@ -111,64 +114,69 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	}
 	results := make(chan loadResult, 10)
 	var wg sync.WaitGroup
-	runLoad := func(code string, severity Severity, fn func() error) {
+	runLoad := func(label, code string, severity Severity, fn func(progress func(current, total int)) error) {
+		task := progress.BeginTask(label)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := fn(); err != nil {
+			defer task.Done()
+			err := fn(func(current, total int) {
+				task.Update(current, total)
+			})
+			if err != nil {
 				results <- loadResult{code: code, severity: severity, message: err.Error()}
 			}
 		}()
 	}
 
-	runLoad("source_teams_load", SeverityError, func() error {
+	runLoad("Loading source teams", "source_teams_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourceTeams, loadErr = loadTeams(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.TeamsFile)
+		sourceTeams, loadErr = loadTeams(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.TeamsFile, progressFn)
 		return loadErr
 	})
-	runLoad("source_programs_load", SeverityWarning, func() error {
+	runLoad("Loading source programs", "source_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword)
+		sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
 		return loadErr
 	})
-	runLoad("source_plans_load", SeverityWarning, func() error {
+	runLoad("Loading source plans", "source_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword)
+		sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
 		return loadErr
 	})
-	runLoad("source_persons_load", SeverityError, func() error {
+	runLoad("Loading source persons", "source_persons_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.PersonsFile)
+		sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.PersonsFile, progressFn)
 		return loadErr
 	})
-	runLoad("source_resources_load", SeverityError, func() error {
+	runLoad("Loading source resources", "source_resources_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourceResources, loadErr = loadResources(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.ResourcesFile)
+		sourceResources, loadErr = loadResources(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.ResourcesFile, progressFn)
 		return loadErr
 	})
-	runLoad("target_teams_load", SeverityError, func() error {
+	runLoad("Loading target teams", "target_teams_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetTeams, loadErr = loadTeams(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "")
+		targetTeams, loadErr = loadTeams(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
 		return loadErr
 	})
-	runLoad("target_programs_load", SeverityWarning, func() error {
+	runLoad("Loading target programs", "target_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+		targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
 		return loadErr
 	})
-	runLoad("target_plans_load", SeverityWarning, func() error {
+	runLoad("Loading target plans", "target_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+		targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
 		return loadErr
 	})
-	runLoad("target_persons_load", SeverityError, func() error {
+	runLoad("Loading target persons", "target_persons_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "")
+		targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
 		return loadErr
 	})
-	runLoad("target_resources_load", SeverityWarning, func() error {
+	runLoad("Loading target resources", "target_resources_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetResources, loadErr = loadResources(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "")
+		targetResources, loadErr = loadResources(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
 		return loadErr
 	})
 
@@ -183,7 +191,6 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	} else if sourceClient == nil {
 		findings = append(findings, newFinding(SeverityWarning, "issue_export_skipped", "Issue Teams-field export was skipped because no source Jira base URL was provided"))
 	}
-	progress.End()
 
 	if hasErrors(findings) {
 		return migrationState{}, findings
@@ -238,7 +245,8 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	if artifacts, err := writeEntityExports(cfg, state); err == nil {
 		state.Artifacts = artifacts
 		state.MembershipExportPath = artifactPathByKey(artifacts, "source_team_memberships")
-		state.IssueExportPath = artifactPathByKey(artifacts, "source_issues_with_team_values")
+		state.IssueExportPath = artifactPathByKey(artifacts, "source_issues_with_team_values_detailed")
+		state.IssueImportExportPath = artifactPathByKey(artifacts, "source_issues_with_team_values_import")
 		for _, artifact := range artifacts {
 			findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
 		}
@@ -249,21 +257,51 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 
 	progress.StartCount("Exporting issues with team values")
 	if sourceClient != nil {
-		selection, issueRows, issuePath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, sourceTeams, progress)
+		selection, issueRows, issuePath, issueImportPath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, sourceTeams, progress)
 		state.TeamsField = selection
 		state.IssueTeamRows = issueRows
 		if issuePath != "" {
 			state.IssueExportPath = issuePath
 			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
-				Key:   "source_issues_with_team_values",
-				Label: "Source issues with team values",
+				Key:   "source_issues_with_team_values_detailed",
+				Label: "Detailed pre-migration issue/team export",
 				Path:  issuePath,
 				Count: len(issueRows),
 			})
+			if issueImportPath != "" {
+				state.IssueImportExportPath = issueImportPath
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+					Key:   "source_issues_with_team_values_import",
+					Label: "Import-ready issue/team CSV",
+					Path:  issueImportPath,
+					Count: len(issueRows),
+				})
+			}
 		}
 		findings = append(findings, issueFindings...)
 	}
 	progress.End()
+
+	if cfg.ScanFilters {
+		progress.StartCount("Scanning Jira filters for Team clauses")
+		if sourceClient == nil {
+			findings = append(findings, newFinding(SeverityError, "filter_scan_skipped", "Filter scan was requested but no source Jira base URL is available"))
+		} else {
+			rows, exportPath, artifact, scanFindings, _, err := scanFiltersWithClient(cfg, sourceClient, sourceTeams, func(current, total int) {
+				progress.UpdateCount(current, total)
+			})
+			state.FilterTeamClauseRows = rows
+			findings = append(findings, scanFindings...)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityError, "filter_scan_failed", err.Error()))
+			} else if artifact != nil {
+				state.FilterScanExportPath = exportPath
+				state.Artifacts = replaceArtifact(state.Artifacts, *artifact)
+				findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
+			}
+		}
+		progress.End()
+	}
 
 	progress.Start("Writing generated identity mapping")
 	if generatedPath, err := writeGeneratedIdentityMapping(cfg, state.IdentityMappings); err == nil && generatedPath != "" {
@@ -453,9 +491,6 @@ func buildResourcePlans(state migrationState) ([]ResourcePlan, []Finding) {
 			WeeklyHours:      resource.WeeklyHours,
 			Status:           "planned",
 		}
-		if plan.WeeklyHours == 0 {
-			plan.WeeklyHours = 40
-		}
 
 		sourcePersonID := int64(0)
 		if resource.Person != nil {
@@ -558,7 +593,7 @@ func planResourceActions(state migrationState) ([]Action, []Finding) {
 		status := resource.Status
 		details := resource.Reason
 		if details == "" {
-			details = fmt.Sprintf("team=%s user=%s weeklyHours=%.2f", resource.TargetTeamID, resource.TargetUserID, resource.WeeklyHours)
+			details = fmt.Sprintf("team=%s user=%s weeklyHours=%s", resource.TargetTeamID, resource.TargetUserID, formatWeeklyHours(resource.WeeklyHours))
 		}
 		actions = append(actions, Action{
 			Kind:     "resource",
@@ -705,7 +740,8 @@ func writeGeneratedIdentityMapping(cfg Config, mappings IdentityMapping) (string
 		return "", err
 	}
 
-	path := filepath.Join(cfg.OutputDir, "identity-mapping.generated.csv")
+	const name = "identity-mapping.generated.csv"
+	path := outputPathForName(cfg, name)
 	file, err := os.Create(path)
 	if err != nil {
 		return "", err
@@ -728,10 +764,16 @@ func writeGeneratedIdentityMapping(cfg Config, mappings IdentityMapping) (string
 		}
 	}
 	writer.Flush()
-	return path, writer.Error()
+	if err := writer.Error(); err != nil {
+		return "", err
+	}
+	if err := pruneOutputFamily(cfg.OutputDir, name, outputRetentionLimit); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
-func loadTeams(baseURL, username, password, file string) ([]TeamDTO, error) {
+func loadTeams(baseURL, username, password, file string, progress func(current, total int)) ([]TeamDTO, error) {
 	if file != "" {
 		return loadJSONFile[TeamDTO](file)
 	}
@@ -739,10 +781,10 @@ func loadTeams(baseURL, username, password, file string) ([]TeamDTO, error) {
 	if err != nil {
 		return nil, err
 	}
-	return client.ListTeams()
+	return client.ListTeams(progress)
 }
 
-func loadPersons(baseURL, username, password, file string) ([]PersonDTO, error) {
+func loadPersons(baseURL, username, password, file string, progress func(current, total int)) ([]PersonDTO, error) {
 	if file != "" {
 		return loadJSONFile[PersonDTO](file)
 	}
@@ -750,10 +792,10 @@ func loadPersons(baseURL, username, password, file string) ([]PersonDTO, error) 
 	if err != nil {
 		return nil, err
 	}
-	return client.ListPersons()
+	return client.ListPersons(progress)
 }
 
-func loadResources(baseURL, username, password, file string) ([]ResourceDTO, error) {
+func loadResources(baseURL, username, password, file string, progress func(current, total int)) ([]ResourceDTO, error) {
 	if file != "" {
 		return loadJSONFile[ResourceDTO](file)
 	}
@@ -761,10 +803,10 @@ func loadResources(baseURL, username, password, file string) ([]ResourceDTO, err
 	if err != nil {
 		return nil, err
 	}
-	return client.ListResources()
+	return client.ListResources(progress)
 }
 
-func loadPrograms(baseURL, username, password string) ([]ProgramDTO, error) {
+func loadPrograms(baseURL, username, password string, progress func(current, total int)) ([]ProgramDTO, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, nil
 	}
@@ -772,10 +814,10 @@ func loadPrograms(baseURL, username, password string) ([]ProgramDTO, error) {
 	if err != nil {
 		return nil, err
 	}
-	return client.ListPrograms()
+	return client.ListPrograms(progress)
 }
 
-func loadPlans(baseURL, username, password string) ([]PlanDTO, error) {
+func loadPlans(baseURL, username, password string, progress func(current, total int)) ([]PlanDTO, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, nil
 	}
@@ -783,7 +825,7 @@ func loadPlans(baseURL, username, password string) ([]PlanDTO, error) {
 	if err != nil {
 		return nil, err
 	}
-	return client.ListPlans()
+	return client.ListPlans(progress)
 }
 
 func hydrateResourceLinkedPersons(client *jiraClient, persons []PersonDTO, resources []ResourceDTO, side string, findings []Finding) ([]PersonDTO, []Finding) {
@@ -1214,7 +1256,8 @@ func enrichIssuesCSV(cfg Config, mappings []TeamMapping, teams []TeamDTO) (strin
 		outputRows = append(outputRows, row)
 	}
 
-	outputPath := filepath.Join(cfg.OutputDir, "enriched-issues.csv")
+	const name = "enriched-issues.csv"
+	outputPath := outputPathForName(cfg, name)
 	outFile, err := os.Create(outputPath)
 	if err != nil {
 		return "", err
@@ -1226,7 +1269,13 @@ func enrichIssuesCSV(cfg Config, mappings []TeamMapping, teams []TeamDTO) (strin
 		return "", err
 	}
 	writer.Flush()
-	return outputPath, writer.Error()
+	if err := writer.Error(); err != nil {
+		return "", err
+	}
+	if err := pruneOutputFamily(cfg.OutputDir, name, outputRetentionLimit); err != nil {
+		return "", err
+	}
+	return outputPath, nil
 }
 
 func migrationMetadata(state migrationState) map[string]any {
@@ -1237,6 +1286,7 @@ func migrationMetadata(state migrationState) map[string]any {
 			"teams":     state.TeamMappings,
 			"resources": state.ResourcePlans,
 			"issues":    state.IssueTeamRows,
+			"filters":   state.FilterTeamClauseRows,
 		},
 		"counts": map[string]int{
 			"sourcePrograms":  len(state.SourcePrograms),
@@ -1259,7 +1309,15 @@ func migrationMetadata(state migrationState) map[string]any {
 	}
 	if state.IssueExportPath != "" {
 		metadata["issueExport"] = map[string]any{
+			"label": "Detailed pre-migration issue/team export",
 			"path":  state.IssueExportPath,
+			"count": len(state.IssueTeamRows),
+		}
+	}
+	if state.IssueImportExportPath != "" {
+		metadata["issueImportExport"] = map[string]any{
+			"label": "Import-ready issue/team CSV",
+			"path":  state.IssueImportExportPath,
 			"count": len(state.IssueTeamRows),
 		}
 	}
@@ -1267,6 +1325,13 @@ func migrationMetadata(state migrationState) map[string]any {
 		metadata["membershipExport"] = map[string]any{
 			"path":  state.MembershipExportPath,
 			"count": len(state.ResourcePlans),
+		}
+	}
+	if state.FilterScanExportPath != "" {
+		metadata["filterScanExport"] = map[string]any{
+			"label": "Filters with Team clauses",
+			"path":  state.FilterScanExportPath,
+			"count": len(state.FilterTeamClauseRows),
 		}
 	}
 	return metadata
@@ -1290,7 +1355,7 @@ func writeEntityExports(cfg Config, state migrationState) ([]Artifact, error) {
 		if len(rows) == 0 {
 			return nil
 		}
-		path, err := writeCSVExport(filepath.Join(cfg.OutputDir, name), header, rows)
+		path, err := writeCSVExport(cfg, name, header, rows)
 		if err != nil {
 			return err
 		}
@@ -1393,7 +1458,8 @@ func replaceArtifact(artifacts []Artifact, replacement Artifact) []Artifact {
 	return append(artifacts, replacement)
 }
 
-func writeCSVExport(path string, header []string, rows [][]string) (string, error) {
+func writeCSVExport(cfg Config, name string, header []string, rows [][]string) (string, error) {
+	path := outputPathForName(cfg, name)
 	file, err := os.Create(path)
 	if err != nil {
 		return "", err
@@ -1410,7 +1476,13 @@ func writeCSVExport(path string, header []string, rows [][]string) (string, erro
 		}
 	}
 	writer.Flush()
-	return path, writer.Error()
+	if err := writer.Error(); err != nil {
+		return "", err
+	}
+	if err := pruneOutputFamily(cfg.OutputDir, name, outputRetentionLimit); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func sourceProgramRows(programs []ProgramDTO) [][]string {
@@ -1573,7 +1645,7 @@ func sourceMembershipRows(resources []ResourceDTO, persons []PersonDTO, teams []
 			teamTitles[resource.TeamID],
 			strconv.FormatInt(personID, 10),
 			email,
-			strconv.FormatFloat(defaultWeeklyHours(resource.WeeklyHours), 'f', -1, 64),
+			formatWeeklyHours(resource.WeeklyHours),
 		})
 	}
 	return rows
@@ -1595,7 +1667,7 @@ func destinationMembershipRows(resources []ResourceDTO, persons []PersonDTO, tea
 			strconv.FormatInt(personID, 10),
 			email,
 			userID,
-			strconv.FormatFloat(defaultWeeklyHours(resource.WeeklyHours), 'f', -1, 64),
+			formatWeeklyHours(resource.WeeklyHours),
 		})
 	}
 	return rows
@@ -1614,7 +1686,7 @@ func membershipMappingRows(plans []ResourcePlan) [][]string {
 			plan.TargetTeamID,
 			plan.TargetTeamName,
 			plan.TargetUserID,
-			strconv.FormatFloat(plan.WeeklyHours, 'f', -1, 64),
+			formatWeeklyHours(plan.WeeklyHours),
 			plan.Status,
 			plan.Reason,
 		})
@@ -1676,49 +1748,52 @@ func resourcePersonDetails(resource ResourceDTO, persons map[int64]PersonDTO) (i
 	return personID, strings.ToLower(strings.TrimSpace(person.JiraUser.Email)), person.JiraUser.JiraUserID
 }
 
-func defaultWeeklyHours(hours float64) float64 {
-	if hours == 0 {
-		return 40
+func formatWeeklyHours(hours *float64) string {
+	if hours == nil {
+		return ""
 	}
-	return hours
+	return strconv.FormatFloat(*hours, 'f', -1, 64)
 }
 
-func exportIssuesWithTeamsField(cfg Config, client *jiraClient, sourceTeams []TeamDTO, progress *progressTracker) (*TeamsFieldSelection, []IssueTeamRow, string, []Finding) {
+func exportIssuesWithTeamsField(cfg Config, client *jiraClient, sourceTeams []TeamDTO, progress *progressTracker) (*TeamsFieldSelection, []IssueTeamRow, string, string, []Finding) {
 	fields, err := client.ListFields()
 	if err != nil {
-		return nil, nil, "", []Finding{newFinding(SeverityWarning, "teams_field_discovery_failed", fmt.Sprintf("Could not load Jira fields: %v", err))}
+		return nil, nil, "", "", []Finding{newFinding(SeverityWarning, "teams_field_discovery_failed", fmt.Sprintf("Could not load Jira fields: %v", err))}
 	}
 
 	selection, findings := selectTeamsField(fields)
 	if selection == nil {
-		return nil, nil, "", findings
+		return nil, nil, "", "", findings
 	}
 
 	jql := fmt.Sprintf(`"%s" is not EMPTY`, selection.Field.Name)
-	issues, err := client.SearchIssues(jql, []string{"summary", "project", selection.Field.ID}, func(current, total int) {
+	issues, err := client.SearchIssues(jql, []string{"summary", "project", "projectType", selection.Field.ID}, func(current, total int) {
 		if progress != nil {
 			progress.UpdateCount(current, total)
 		}
 	})
 	if err != nil {
 		findings = append(findings, newFinding(SeverityWarning, "teams_field_issue_search_failed", fmt.Sprintf("Could not search issues for teams field %s: %v", selection.Field.ID, err)))
-		return selection, nil, "", findings
+		return selection, nil, "", "", findings
 	}
 
 	rows := buildIssueTeamRows(issues, selection.Field, sourceTeams)
 	if len(rows) == 0 {
 		findings = append(findings, newFinding(SeverityInfo, "teams_field_no_issues", fmt.Sprintf("No issues found with a value for %s", selection.Field.Name)))
-		return selection, rows, "", findings
+		return selection, rows, "", "", findings
 	}
 
-	path, err := writeIssueTeamExport(cfg, selection.Field, rows)
+	detailedPath, importPath, err := writeIssueTeamExports(cfg, rows)
 	if err != nil {
 		findings = append(findings, newFinding(SeverityWarning, "teams_field_issue_export_failed", err.Error()))
-		return selection, rows, "", findings
+		return selection, rows, "", "", findings
 	}
 
-	findings = append(findings, newFinding(SeverityInfo, "teams_field_issue_exported", fmt.Sprintf("Exported %d issues with a value for %s to %s", len(rows), selection.Field.Name, path)))
-	return selection, rows, path, findings
+	findings = append(findings,
+		newFinding(SeverityInfo, "teams_field_issue_exported", fmt.Sprintf("Exported %d issues with a value for %s to detailed CSV %s", len(rows), selection.Field.Name, detailedPath)),
+		newFinding(SeverityInfo, "teams_field_issue_import_exported", fmt.Sprintf("Exported %d issues with a value for %s to import-ready CSV %s", len(rows), selection.Field.Name, importPath)),
+	)
+	return selection, rows, detailedPath, importPath, findings
 }
 
 func selectTeamsField(fields []JiraField) (*TeamsFieldSelection, []Finding) {
@@ -1818,12 +1893,7 @@ func buildIssueTeamRows(issues []JiraIssue, field JiraField, sourceTeams []TeamD
 				names = append(names, name)
 			}
 		}
-		projectKey := ""
-		if project, ok := issue.Fields["project"].(map[string]any); ok {
-			if key, ok := project["key"].(string); ok {
-				projectKey = key
-			}
-		}
+		projectKey, projectName, projectType := issueProjectDetails(issue.Fields)
 		summary := ""
 		if rawSummary, ok := issue.Fields["summary"].(string); ok {
 			summary = rawSummary
@@ -1831,14 +1901,45 @@ func buildIssueTeamRows(issues []JiraIssue, field JiraField, sourceTeams []TeamD
 		rows = append(rows, IssueTeamRow{
 			IssueKey:        issue.Key,
 			ProjectKey:      projectKey,
+			ProjectName:     projectName,
+			ProjectType:     projectType,
 			Summary:         summary,
 			TeamsFieldID:    field.ID,
-			TeamsFieldName:  field.Name,
 			SourceTeamIDs:   strings.Join(teamIDs, ","),
 			SourceTeamNames: strings.Join(names, ","),
 		})
 	}
 	return rows
+}
+
+func issueProjectDetails(fields map[string]any) (string, string, string) {
+	projectKey := ""
+	projectName := ""
+	projectType := ""
+
+	if project, ok := fields["project"].(map[string]any); ok {
+		if key, ok := project["key"].(string); ok {
+			projectKey = key
+		}
+		if name, ok := project["name"].(string); ok {
+			projectName = name
+		}
+		if typeKey, ok := project["projectTypeKey"].(string); ok {
+			projectType = typeKey
+		}
+		if projectType == "" {
+			if typeValue, ok := project["projectType"].(string); ok {
+				projectType = typeValue
+			}
+		}
+	}
+	if projectType == "" {
+		if typeValue, ok := fields["projectType"].(string); ok {
+			projectType = typeValue
+		}
+	}
+
+	return projectKey, projectName, projectType
 }
 
 func extractTeamFieldIDs(raw any) []string {
@@ -1874,26 +1975,62 @@ func extractTeamFieldIDs(raw any) []string {
 	return result
 }
 
-func writeIssueTeamExport(cfg Config, field JiraField, rows []IssueTeamRow) (string, error) {
+func writeIssueTeamExports(cfg Config, rows []IssueTeamRow) (string, string, error) {
 	if err := ensureOutputDir(cfg.OutputDir); err != nil {
-		return "", err
+		return "", "", err
 	}
-	path := filepath.Join(cfg.OutputDir, "issues-with-teams.pre-migration.csv")
-	file, err := os.Create(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
 
-	writer := csv.NewWriter(file)
-	if err := writer.Write([]string{"issueKey", "projectKey", "summary", "teamsFieldId", "teamsFieldName", "sourceTeamIds", "sourceTeamNames"}); err != nil {
-		return "", err
+	detailedPath, err := writeCSVExport(
+		cfg,
+		"issues-with-teams.pre-migration.csv",
+		[]string{"Issue Key", "Project Key", "Project Name", "Project Type", "Summary", "Team ID", "Team Name", "Teams Field ID"},
+		detailedIssueTeamRows(rows),
+	)
+	if err != nil {
+		return "", "", err
 	}
+
+	importPath, err := writeCSVExport(
+		cfg,
+		"issues-with-teams.import-ready.csv",
+		[]string{"Issue Key", "Project Key", "Project Name", "Project Type", "Summary", "Team ID"},
+		importIssueTeamRows(rows),
+	)
+	if err != nil {
+		return "", "", err
+	}
+
+	return detailedPath, importPath, nil
+}
+
+func detailedIssueTeamRows(rows []IssueTeamRow) [][]string {
+	out := make([][]string, 0, len(rows))
 	for _, row := range rows {
-		if err := writer.Write([]string{row.IssueKey, row.ProjectKey, row.Summary, row.TeamsFieldID, row.TeamsFieldName, row.SourceTeamIDs, row.SourceTeamNames}); err != nil {
-			return "", err
-		}
+		out = append(out, []string{
+			row.IssueKey,
+			row.ProjectKey,
+			row.ProjectName,
+			row.ProjectType,
+			row.Summary,
+			row.SourceTeamIDs,
+			row.SourceTeamNames,
+			row.TeamsFieldID,
+		})
 	}
-	writer.Flush()
-	return path, writer.Error()
+	return out
+}
+
+func importIssueTeamRows(rows []IssueTeamRow) [][]string {
+	out := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, []string{
+			row.IssueKey,
+			row.ProjectKey,
+			row.ProjectName,
+			row.ProjectType,
+			row.Summary,
+			row.SourceTeamIDs,
+		})
+	}
+	return out
 }

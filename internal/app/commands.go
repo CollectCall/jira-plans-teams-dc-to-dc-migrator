@@ -101,6 +101,7 @@ func newReport(cfg Config) Report {
 			Resources:       cfg.ResourcesFile,
 			IssuesCSV:       cfg.IssuesCSV,
 			TeamScope:       cfg.TeamScope,
+			ScanFilters:     cfg.ScanFilters,
 		},
 		ExitBehavior: ExitBehavior{
 			SuccessCode:     ExitSuccess,

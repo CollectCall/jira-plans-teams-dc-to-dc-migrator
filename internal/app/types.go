@@ -49,6 +49,7 @@ type InputFiles struct {
 	Persons         string `json:"persons,omitempty"`
 	Resources       string `json:"resources,omitempty"`
 	IssuesCSV       string `json:"issuesCsv,omitempty"`
+	TeamScope       string `json:"teamScope,omitempty"`
 }
 
 type Action struct {

@@ -226,7 +226,9 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	progress.Start("Building mapping plans")
 	state.ProgramMappings = buildProgramMappings(sourcePrograms, targetPrograms)
 	state.PlanMappings = buildPlanMappings(sourcePlans, targetPlans, state.ProgramMappings, sourcePrograms, targetPrograms, sourceTeams, targetTeams)
-	state.TeamMappings, findings = append(state.TeamMappings, buildTeamMappings(sourceTeams, targetTeams)...), findings
+	teamMappings, teamFindings := buildTeamMappings(cfg, sourceTeams, targetTeams, sourcePlans, state.PlanMappings)
+	state.TeamMappings = teamMappings
+	findings = append(findings, teamFindings...)
 	resourcePlans, resourceFindings := buildResourcePlans(state)
 	state.ResourcePlans = resourcePlans
 	findings = append(findings, resourceFindings...)
@@ -279,16 +281,82 @@ func sourceIssueClient(cfg Config) (*jiraClient, error) {
 	return newJiraClient(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword)
 }
 
-func buildTeamMappings(sourceTeams, targetTeams []TeamDTO) []TeamMapping {
+func buildTeamMappings(cfg Config, sourceTeams, targetTeams []TeamDTO, sourcePlans []PlanDTO, planMappings []PlanMapping) ([]TeamMapping, []Finding) {
 	targetByTitle := map[string][]TeamDTO{}
 	for _, team := range targetTeams {
 		targetByTitle[normalizeTitle(team.Title)] = append(targetByTitle[normalizeTitle(team.Title)], team)
 	}
 
+	planTitlesByTeamID := map[int64][]string{}
+	for _, plan := range sourcePlans {
+		for _, teamID := range plan.PlanTeams {
+			planTitlesByTeamID[teamID] = append(planTitlesByTeamID[teamID], plan.Title)
+		}
+	}
+
+	targetPlanExistsBySourceTeamID := map[int64]bool{}
+	for _, mapping := range planMappings {
+		hasTargetPlan := mapping.Decision == "merge"
+		for _, teamID := range parseInt64List(mapping.SourcePlanTeamIDs) {
+			if hasTargetPlan {
+				targetPlanExistsBySourceTeamID[teamID] = true
+			}
+		}
+	}
+
+	var (
+		findings                 []Finding
+		skippedSharedCount       int
+		skippedNonSharedCount    int
+		manualPrerequisiteTitles []string
+	)
 	mappings := make([]TeamMapping, 0, len(sourceTeams))
 	nextCreateOffset := 0
 	for _, source := range sourceTeams {
 		matches := targetByTitle[normalizeTitle(source.Title)]
+		planUsage := strings.Join(planTitlesByTeamID[source.ID], ", ")
+		scopeReason := teamScopeSkipReason(cfg.TeamScope, source.Shareable)
+		if scopeReason != "" {
+			mapping := TeamMapping{
+				SourceTeamID:    source.ID,
+				SourceTitle:     source.Title,
+				SourceShareable: source.Shareable,
+				Decision:        "skipped",
+				Reason:          scopeReason,
+			}
+			if len(matches) == 1 {
+				mapping.TargetTeamID = strconv.FormatInt(matches[0].ID, 10)
+				mapping.TargetTitle = matches[0].Title
+			}
+			mappings = append(mappings, mapping)
+			if source.Shareable {
+				skippedSharedCount++
+			} else {
+				skippedNonSharedCount++
+			}
+			continue
+		}
+
+		if !source.Shareable && len(matches) == 0 {
+			reason := "non-shared team must be created manually in the destination plan before migration"
+			if !targetPlanExistsBySourceTeamID[source.ID] {
+				reason = "non-shared team requires a destination plan to exist first, then manual team creation before migration"
+			}
+			if planUsage != "" {
+				reason = fmt.Sprintf("%s; source plan usage: %s", reason, planUsage)
+			}
+			mappings = append(mappings, TeamMapping{
+				SourceTeamID:    source.ID,
+				SourceTitle:     source.Title,
+				SourceShareable: source.Shareable,
+				TargetTitle:     source.Title,
+				Decision:        "skipped",
+				Reason:          reason,
+			})
+			manualPrerequisiteTitles = append(manualPrerequisiteTitles, source.Title)
+			continue
+		}
+
 		switch len(matches) {
 		case 0:
 			nextCreateOffset++
@@ -315,11 +383,21 @@ func buildTeamMappings(sourceTeams, targetTeams []TeamDTO) []TeamMapping {
 				SourceTitle:     source.Title,
 				SourceShareable: source.Shareable,
 				Decision:        "conflict",
+				Reason:          "multiple destination teams match normalized title",
 				ConflictReason:  "multiple destination teams match normalized title",
 			})
 		}
 	}
-	return mappings
+	if skippedSharedCount > 0 {
+		findings = append(findings, newFinding(SeverityInfo, "team_scope_skipped_shared", fmt.Sprintf("Skipped %d shared teams because team scope is %s", skippedSharedCount, cfg.TeamScope)))
+	}
+	if skippedNonSharedCount > 0 {
+		findings = append(findings, newFinding(SeverityInfo, "team_scope_skipped_non_shared", fmt.Sprintf("Skipped %d non-shared teams because team scope is %s", skippedNonSharedCount, cfg.TeamScope)))
+	}
+	if len(manualPrerequisiteTitles) > 0 {
+		findings = append(findings, newFinding(SeverityWarning, "non_shared_team_manual_prerequisite", fmt.Sprintf("Skipped %d non-shared teams that must already exist in destination plans before migration: %s", len(manualPrerequisiteTitles), strings.Join(manualPrerequisiteTitles, ", "))))
+	}
+	return mappings, findings
 }
 
 func buildResourcePlans(state migrationState) ([]ResourcePlan, []Finding) {
@@ -369,9 +447,12 @@ func buildResourcePlans(state migrationState) ([]ResourcePlan, []Finding) {
 		plan.SourcePersonID = sourcePersonID
 
 		teamMapping, ok := mappingsBySourceTeam[resource.TeamID]
-		if !ok || teamMapping.Decision == "conflict" {
+		if !ok || teamMapping.Decision == "conflict" || teamMapping.Decision == "skipped" {
 			plan.Status = "skipped"
 			plan.Reason = "team mapping missing or conflicted"
+			if teamMapping.Reason != "" {
+				plan.Reason = teamMapping.Reason
+			}
 			plans = append(plans, plan)
 			continue
 		}
@@ -426,15 +507,21 @@ func planTeamActions(state migrationState) []Action {
 			status = "reused"
 		case "add":
 			status = "planned"
+		case "skipped":
+			status = "skipped"
 		case "conflict":
 			status = "skipped"
+		}
+		details := fmt.Sprintf("%s -> %s (%s)", mapping.SourceTitle, mapping.TargetTitle, mapping.Decision)
+		if mapping.Reason != "" {
+			details = fmt.Sprintf("%s -> %s (%s: %s)", mapping.SourceTitle, mapping.TargetTitle, mapping.Decision, mapping.Reason)
 		}
 		actions = append(actions, Action{
 			Kind:     "team",
 			SourceID: strconv.FormatInt(mapping.SourceTeamID, 10),
 			TargetID: mapping.TargetTeamID,
 			Status:   status,
-			Details:  fmt.Sprintf("%s -> %s (%s)", mapping.SourceTitle, mapping.TargetTitle, mapping.Decision),
+			Details:  details,
 		})
 	}
 	return actions
@@ -1006,6 +1093,35 @@ func normalizeTitle(title string) string {
 	return strings.ToLower(strings.TrimSpace(title))
 }
 
+func parseInt64List(value string) []int64 {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]int64, 0, len(parts))
+	for _, part := range parts {
+		id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+		if err == nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func teamScopeSkipReason(scope string, shareable bool) string {
+	switch scope {
+	case "shared-only":
+		if !shareable {
+			return "skipped because this run is limited to shared teams"
+		}
+	case "non-shared-only":
+		if shareable {
+			return "skipped because this run is limited to non-shared teams"
+		}
+	}
+	return ""
+}
+
 func expectedSequentialID(existingCount, createOffset int) string {
 	return strconv.Itoa(existingCount + createOffset)
 }
@@ -1401,6 +1517,10 @@ func teamRowsWithPlanUsage(teams []TeamDTO, plans []PlanDTO) [][]string {
 func teamMappingRows(mappings []TeamMapping) [][]string {
 	rows := make([][]string, 0, len(mappings))
 	for _, mapping := range mappings {
+		reason := mapping.Reason
+		if reason == "" {
+			reason = mapping.ConflictReason
+		}
 		rows = append(rows, []string{
 			strconv.FormatInt(mapping.SourceTeamID, 10),
 			mapping.SourceTitle,
@@ -1408,7 +1528,7 @@ func teamMappingRows(mappings []TeamMapping) [][]string {
 			mapping.TargetTeamID,
 			mapping.TargetTitle,
 			mapping.Decision,
-			mapping.ConflictReason,
+			reason,
 		})
 	}
 	return rows

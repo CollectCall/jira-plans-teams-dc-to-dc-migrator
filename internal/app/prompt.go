@@ -187,6 +187,20 @@ func completeConfigInteractively(cfg *Config) error {
 		}
 	}
 
+	if cfg.TeamScope == "" || cfg.TeamScope == "all" {
+		value, err := wizard.choice(wizardField{
+			Label:        "Team migration scope",
+			Description:  "Choose whether this run should include all teams, only shared teams, or only non-shared teams.",
+			InputHelp:    "Type the number of your choice and press Enter.",
+			ArtifactInfo: "Non-shared teams cannot be created by this tool. They must already exist in the destination plan before migration, so splitting shared and non-shared runs is supported.",
+			Default:      "all",
+		}, []string{"all", "shared-only", "non-shared-only"})
+		if err != nil {
+			return err
+		}
+		cfg.TeamScope = value
+	}
+
 	return nil
 }
 
@@ -395,6 +409,18 @@ func runConfigInitWizard(cfg Config) error {
 		return err
 	}
 	cfg.ReportFormat = ReportFormat(format)
+
+	teamScope, err := wizard.choice(wizardField{
+		Label:        "Default team migration scope",
+		Description:  "Choose whether this profile should migrate all teams, only shared teams, or only non-shared teams by default.",
+		InputHelp:    "Type the number of your choice and press Enter.",
+		ArtifactInfo: "Non-shared teams must already exist in the destination plan before migration. Use shared-only first if you want a two-batch flow.",
+		Default:      nonEmptyDefault(cfg.TeamScope, "all"),
+	}, []string{"all", "shared-only", "non-shared-only"})
+	if err != nil {
+		return err
+	}
+	cfg.TeamScope = teamScope
 
 	setCurrent, err := wizard.choice(wizardField{
 		Label:       "Set as current profile",
@@ -652,6 +678,7 @@ func profileSummary(cfg Config) string {
 	lines = append(lines, fmt.Sprintf("Target base URL: %s", cfg.TargetBaseURL))
 	lines = append(lines, fmt.Sprintf("Output dir: %s", cfg.OutputDir))
 	lines = append(lines, fmt.Sprintf("Report format: %s", cfg.ReportFormat))
+	lines = append(lines, fmt.Sprintf("Team scope: %s", cfg.TeamScope))
 	lines = append(lines, "Credentials: prompted at runtime")
 	return strings.Join(lines, "\n")
 }
@@ -671,7 +698,8 @@ func confirmApplyAfterPreview() (bool, error) {
 	reader := bufio.NewReader(os.Stdin)
 	renderWizardSection("Teams Migrator | Apply", "Apply mode confirmation", []string{
 		"You have just seen the dry-run preview for the planned mappings and writes.",
-		"Apply mode will now create records on the target Jira instance where the plan marked them as create or created.",
+		"Apply mode will now create records on the target Jira instance where the plan marked them as add or created.",
+		"Non-shared teams cannot be created by this tool and must already exist in the destination plan before migration.",
 	}, "Type APPLY exactly to continue, or press Ctrl+C to cancel.", "", "", "Enter APPLY to continue. Ctrl+C cancels.")
 	value, err := readLine(reader, "")
 	if err != nil {

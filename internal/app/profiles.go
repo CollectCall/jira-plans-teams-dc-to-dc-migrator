@@ -30,6 +30,7 @@ type SavedProfile struct {
 	IssuesCSV           string
 	OutputDir           string
 	ReportFormat        string
+	TeamScope           string
 }
 
 func defaultConfigPath() string {
@@ -151,6 +152,9 @@ func applySavedProfile(cfg *Config, profile SavedProfile) {
 	if cfg.ReportFormat == "" {
 		cfg.ReportFormat = ReportFormat(profile.ReportFormat)
 	}
+	if cfg.TeamScope == "" {
+		cfg.TeamScope = profile.TeamScope
+	}
 }
 
 func resolveProfile(cfg Config, store ProfileStore) SavedProfile {
@@ -180,6 +184,7 @@ func savedProfileFromConfig(cfg Config, includeSecrets bool) SavedProfile {
 		IssuesCSV:           cfg.IssuesCSV,
 		OutputDir:           cfg.OutputDir,
 		ReportFormat:        string(cfg.ReportFormat),
+		TeamScope:           cfg.TeamScope,
 	}
 	_ = includeSecrets
 	return profile
@@ -201,6 +206,7 @@ func profileEntries(profile SavedProfile) []profileEntry {
 		{key: "issues_csv", value: profile.IssuesCSV},
 		{key: "output_dir", value: profile.OutputDir},
 		{key: "report_format", value: profile.ReportFormat},
+		{key: "team_scope", value: profile.TeamScope},
 	}
 }
 
@@ -224,6 +230,8 @@ func assignProfileField(profile *SavedProfile, key, value string) {
 		profile.OutputDir = value
 	case "report_format":
 		profile.ReportFormat = value
+	case "team_scope":
+		profile.TeamScope = value
 	}
 }
 

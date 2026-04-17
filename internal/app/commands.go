@@ -100,6 +100,7 @@ func newReport(cfg Config) Report {
 			Persons:         cfg.PersonsFile,
 			Resources:       cfg.ResourcesFile,
 			IssuesCSV:       cfg.IssuesCSV,
+			TeamScope:       cfg.TeamScope,
 		},
 		ExitBehavior: ExitBehavior{
 			SuccessCode:     ExitSuccess,

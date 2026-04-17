@@ -92,6 +92,7 @@ type TeamMapping struct {
 	TargetTeamID    string `json:"targetTeamId"`
 	TargetTitle     string `json:"targetTitle"`
 	Decision        string `json:"decision"`
+	Reason          string `json:"reason,omitempty"`
 	ConflictReason  string `json:"conflictReason,omitempty"`
 }
 

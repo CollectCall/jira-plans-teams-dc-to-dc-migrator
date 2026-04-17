@@ -24,6 +24,7 @@ const (
 	envIssuesCSV       = "TEAMS_MIGRATOR_ISSUES_CSV"
 	envOutputDir       = "TEAMS_MIGRATOR_OUTPUT_DIR"
 	envReportFormat    = "TEAMS_MIGRATOR_REPORT_FORMAT"
+	envTeamScope       = "TEAMS_MIGRATOR_TEAM_SCOPE"
 	envStrict          = "TEAMS_MIGRATOR_STRICT"
 	envDryRun          = "TEAMS_MIGRATOR_DRY_RUN"
 	envReportInput     = "TEAMS_MIGRATOR_REPORT_INPUT"
@@ -45,6 +46,7 @@ type Config struct {
 	OutputDir           string
 	ReportInput         string
 	ReportFormat        ReportFormat
+	TeamScope           string
 	Strict              bool
 	DryRun              bool
 	Apply               bool
@@ -80,6 +82,7 @@ func parseConfig(args []string) (Config, error) {
 	fs.StringVar(&cfg.ConfigPath, "config", defaultConfigPath(), "Path to config.yaml profile store")
 	fs.StringVar(&cfg.Profile, "profile", envValue(envProfile), "Saved profile name from config.yaml")
 	fs.BoolVar(&cfg.Redacted, "redacted", true, "Redact secrets in config show output")
+	fs.StringVar(&cfg.TeamScope, "team-scope", envValue(envTeamScope), "Team migration scope: all, shared-only, or non-shared-only")
 
 	reportFormat := envValue(envReportFormat)
 	fs.StringVar(&reportFormat, "format", reportFormat, "Report format: json or csv")
@@ -126,6 +129,12 @@ func parseConfig(args []string) (Config, error) {
 		cfg.Profile = selectedProfile
 	}
 
+	if strings.TrimSpace(cfg.TeamScope) == "" {
+		cfg.TeamScope = "all"
+	} else {
+		cfg.TeamScope = strings.ToLower(strings.TrimSpace(cfg.TeamScope))
+	}
+
 	if cfg.Command != "config init" && cfg.Command != "config show" && cfg.Command != "config path" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" && !cfg.NoInput {
 		if err := completeConfigInteractively(&cfg); err != nil {
 			return Config{}, err
@@ -166,6 +175,12 @@ func (c Config) validate() error {
 	case "validate", "plan", "migrate", "report", "config init", "config show", "config path", "version", "self-update", "uninstall":
 	default:
 		return fmt.Errorf("unknown command %q", c.Command)
+	}
+
+	switch c.TeamScope {
+	case "all", "shared-only", "non-shared-only":
+	default:
+		return fmt.Errorf("unsupported team scope %q; use all, shared-only, or non-shared-only", c.TeamScope)
 	}
 
 	if c.Command == "report" && c.ReportInput == "" {

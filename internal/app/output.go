@@ -423,7 +423,11 @@ func formatPlanMappingMaps(rows []any) []string {
 func formatTeamMappings(rows []TeamMapping) []string {
 	lines := []string{}
 	for _, row := range rows {
-		lines = append(lines, fmt.Sprintf("- %s -> %s (%s)", row.SourceTitle, labelWithID(row.TargetTitle, row.TargetTeamID), row.Decision))
+		line := fmt.Sprintf("- %s -> %s (%s)", row.SourceTitle, labelWithID(row.TargetTitle, row.TargetTeamID), row.Decision)
+		if row.Reason != "" {
+			line = fmt.Sprintf("%s: %s", line, row.Reason)
+		}
+		lines = append(lines, line)
 	}
 	return lines
 }
@@ -435,11 +439,15 @@ func formatTeamMappingMaps(rows []any) []string {
 		if !ok {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("- %s -> %s (%s)",
+		line := fmt.Sprintf("- %s -> %s (%s)",
 			asString(row["sourceTitle"]),
 			labelWithID(asString(row["targetTitle"]), asString(row["targetTeamId"])),
 			asString(row["decision"]),
-		))
+		)
+		if reason := asString(row["reason"]); reason != "" {
+			line = fmt.Sprintf("%s: %s", line, reason)
+		}
+		lines = append(lines, line)
 	}
 	return lines
 }
@@ -593,6 +601,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --issues-csv            Optional issues CSV")
 	fmt.Fprintln(w, "  --output-dir            Directory for generated reports")
 	fmt.Fprintln(w, "  --format                Report output: json or csv")
+	fmt.Fprintln(w, "  --team-scope            Team migration scope: all, shared-only, or non-shared-only")
 	fmt.Fprintln(w, "  --config                Path to config.yaml profile store")
 	fmt.Fprintln(w, "  --profile               Saved profile name")
 	fmt.Fprintln(w, "  --redacted              Kept for compatibility; config show no longer reads secrets from YAML")
@@ -616,6 +625,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_ISSUES_CSV")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_OUTPUT_DIR")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_REPORT_FORMAT")
+	fmt.Fprintln(w, "  TEAMS_MIGRATOR_TEAM_SCOPE")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_STRICT")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_DRY_RUN")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_REPORT_INPUT")

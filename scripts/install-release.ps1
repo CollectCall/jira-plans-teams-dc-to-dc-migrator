@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$Repo = "CollectCall/jira-plans-teams-dc-to-dc-migrator"
+$Repo = "CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator"
 $Version = if ($env:VERSION) { $env:VERSION } else { "latest" }
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $HOME "bin" }
 $LatestReleaseApi = "https://api.github.com/repos/$Repo/releases/latest"

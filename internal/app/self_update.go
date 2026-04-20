@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	releaseRepo         = "CollectCall/jira-plans-teams-dc-to-dc-migrator"
+	releaseRepo         = "CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator"
 	releaseBaseURL      = "https://github.com/" + releaseRepo + "/releases/download"
 	envSkipUpdatePrompt = "TEAMS_MIGRATOR_SKIP_UPDATE_CHECK"
 )

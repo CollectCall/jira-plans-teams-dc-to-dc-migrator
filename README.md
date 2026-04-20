@@ -1,4 +1,4 @@
-# Teams Migrator
+# Jira Advanced Roadmaps Teams Migrator
 
 This tool helps migrate Jira Advanced Roadmaps teams and team memberships between Jira Server/Data Center instances. It collects source and target data, writes review files to support manual recreation and mapping, migrates teams and memberships where they can be matched and safely created, and can fix related Jira references such as Parent Link values and Team IDs in saved filters. It does not support Jira Cloud.
 
@@ -6,13 +6,13 @@ This tool helps migrate Jira Advanced Roadmaps teams and team memberships betwee
 
 ### Linux
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.sh | sh
+curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/master/scripts/install-release.sh | sh
 teams-migrator init
 ```
 
 Manual install from a downloaded release artifact:
 
-1. Download the correct release asset from the [GitHub Releases page](https://github.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/releases):
+1. Download the correct release asset from the [GitHub Releases page](https://github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/releases):
    - `teams-migrator_<version>_linux_amd64.tar.gz`
    - `teams-migrator_<version>_linux_arm64.tar.gz`
 2. Install it locally:
@@ -27,13 +27,13 @@ teams-migrator init
 
 ### macOS
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.sh | sh
+curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/master/scripts/install-release.sh | sh
 teams-migrator init
 ```
 
 ### Windows
 ```powershell
-irm https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.ps1 | iex
+irm https://raw.githubusercontent.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/master/scripts/install-release.ps1 | iex
 teams-migrator.exe init
 ```
 
@@ -81,6 +81,14 @@ To use ScriptRunner for that, install and publish these endpoint scripts in your
 The ScriptRunner endpoints require Jira admin permission and basic auth; `init` verifies them during setup when the source Jira base URL is available.
 
 If ScriptRunner is not available, use `--filter-source-csv` with a CSV containing `Filter ID`, `Filter Name`, `Owner`, and `JQL` (DB-derived).
+
+Sample SQL exports for common Jira database engines are included under `scripts/sql/`:
+- `postgresql-source-filters.sql`
+- `mysql-source-filters.sql`
+- `sqlserver-source-filters.sql`
+- `oracle-source-filters.sql`
+
+Run the query that matches your Jira database, export the result as CSV with headers, and pass that file to `--filter-source-csv`. The tool will parse the JQL from that CSV and keep only filters that actually reference team IDs.
 
 ## Migration details
 

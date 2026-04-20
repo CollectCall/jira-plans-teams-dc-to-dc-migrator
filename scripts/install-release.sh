@@ -2,7 +2,7 @@
 
 set -eu
 
-repo="CollectCall/jira-plans-teams-dc-to-dc-migrator"
+repo="CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator"
 bin_name="teams-migrator"
 version="${VERSION:-latest}"
 install_dir="${INSTALL_DIR:-$HOME/.local/bin}"

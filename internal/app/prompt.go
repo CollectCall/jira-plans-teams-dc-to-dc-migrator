@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	term "github.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/internal/thirdparty/golang.org/x/term"
+	term "github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/internal/thirdparty/golang.org/x/term"
 )
 
 type wizardContext struct {
@@ -48,7 +48,7 @@ func completeConfigInteractively(cfg *Config) error {
 			cfg.ReportInput = value
 		}
 		return nil
-		case "migrate":
+	case "migrate":
 	default:
 		return nil
 	}

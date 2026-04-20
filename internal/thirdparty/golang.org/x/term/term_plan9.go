@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/internal/thirdparty/golang.org/x/sys/plan9"
+	"github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/internal/thirdparty/golang.org/x/sys/plan9"
 )
 
 type state struct{}

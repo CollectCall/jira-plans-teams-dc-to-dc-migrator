@@ -46,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           ./bin/teams-migrator version
-          ./bin/teams-migrator config path
+          ./bin/teams-migrator config show
 
       - name: Smoke test on Windows
         if: runner.os == 'Windows'
@@ -55,4 +55,4 @@ jobs:
           TEAMS_MIGRATOR_SKIP_UPDATE_CHECK: "1"
         run: |
           ./bin/teams-migrator.exe version
-          ./bin/teams-migrator.exe config path
+          ./bin/teams-migrator.exe config show

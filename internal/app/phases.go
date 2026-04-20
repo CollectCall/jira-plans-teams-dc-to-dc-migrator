@@ -12,9 +12,6 @@ func defaultMigrationPhase(command string) string {
 	if command == "migrate" {
 		return phaseMigrate
 	}
-	if command == "plan" {
-		return phasePreMigrate
-	}
 	return ""
 }
 
@@ -39,9 +36,6 @@ func reportPhase(report Report) string {
 }
 
 func runsPreMigratePhase(command, phase string) bool {
-	if command == "plan" {
-		return true
-	}
 	return command == "migrate" && normalizeMigrationPhase(phase) == phasePreMigrate
 }
 

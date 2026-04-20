@@ -63,7 +63,6 @@ func profileToMap(profile SavedProfile) map[string]any {
 		"issues_csv":                    profile.IssuesCSV,
 		"filter_source_csv":             profile.FilterSourceCSV,
 		"output_dir":                    profile.OutputDir,
-		"report_format":                 profile.ReportFormat,
 		"team_scope":                    profile.TeamScope,
 		"issue_project_scope":           profile.IssueProjectScope,
 		"filter_team_ids_in_scope":      profile.FilterTeamIDsInScope,

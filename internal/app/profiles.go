@@ -31,7 +31,6 @@ type SavedProfile struct {
 	IssuesCSV                   string
 	FilterSourceCSV             string
 	OutputDir                   string
-	ReportFormat                string
 	TeamScope                   string
 	IssueProjectScope           string
 	FilterTeamIDsInScope        bool
@@ -165,9 +164,6 @@ func applySavedProfile(cfg *Config, profile SavedProfile) {
 	if cfg.OutputDir == "" {
 		cfg.OutputDir = profile.OutputDir
 	}
-	if cfg.ReportFormat == "" {
-		cfg.ReportFormat = ReportFormat(profile.ReportFormat)
-	}
 	if cfg.TeamScope == "" {
 		cfg.TeamScope = profile.TeamScope
 	}
@@ -219,7 +215,6 @@ func savedProfileFromConfig(cfg Config, includeSecrets bool) SavedProfile {
 		IssuesCSV:                   cfg.IssuesCSV,
 		FilterSourceCSV:             cfg.FilterSourceCSV,
 		OutputDir:                   cfg.OutputDir,
-		ReportFormat:                string(cfg.ReportFormat),
 		TeamScope:                   cfg.TeamScope,
 		IssueProjectScope:           cfg.IssueProjectScope,
 		FilterTeamIDsInScope:        cfg.FilterTeamIDsInScope,
@@ -251,7 +246,6 @@ func profileEntries(profile SavedProfile) []profileEntry {
 		{key: "issues_csv", value: profile.IssuesCSV},
 		{key: "filter_source_csv", value: profile.FilterSourceCSV},
 		{key: "output_dir", value: profile.OutputDir},
-		{key: "report_format", value: profile.ReportFormat},
 		{key: "team_scope", value: profile.TeamScope},
 		{key: "issue_project_scope", value: profile.IssueProjectScope},
 		{key: "filter_team_ids_in_scope", value: formatBool(profile.FilterTeamIDsInScope)},
@@ -287,8 +281,6 @@ func assignProfileField(profile *SavedProfile, key, value string) {
 		profile.FilterSourceCSV = value
 	case "output_dir":
 		profile.OutputDir = value
-	case "report_format":
-		profile.ReportFormat = value
 	case "team_scope":
 		profile.TeamScope = value
 	case "issue_project_scope":

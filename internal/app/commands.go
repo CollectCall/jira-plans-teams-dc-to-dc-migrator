@@ -7,18 +7,6 @@ import (
 	"time"
 )
 
-func runPlan(cfg Config) Report {
-	report := newReport(cfg)
-	report.Findings = append(report.Findings, cfg.requireCoreInputs()...)
-	if hasErrors(report.Findings) {
-		finalizeReport(&report)
-		return report
-	}
-
-	state, findings, actions := executeMigration(cfg, false)
-	return populateExecutionReport(report, state, findings, actions, "plan_generated", "Execution plan generated from source and target data")
-}
-
 func runMigrate(cfg Config) Report {
 	report := newReport(cfg)
 	report.Findings = append(report.Findings, cfg.requireCoreInputs()...)
@@ -117,7 +105,6 @@ func newReport(cfg Config) Report {
 			FilterSourceCSV:      cfg.FilterSourceCSV,
 			TeamScope:            cfg.TeamScope,
 			IssueProjectScope:    cfg.IssueProjectScope,
-			ScanFilters:          cfg.ScanFilters,
 			FilterTeamIDsInScope: cfg.FilterTeamIDsInScope,
 			ParentLinkInScope:    cfg.ParentLinkInScope,
 			FilterDataSource:     cfg.FilterDataSource,

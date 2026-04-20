@@ -1063,7 +1063,7 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		if cfg.ParentLinkInScope {
 			progressTotal++
 		}
-		if cfg.FilterTeamIDsInScope || cfg.ScanFilters {
+		if cfg.FilterTeamIDsInScope {
 			progressTotal++
 		}
 	}
@@ -1316,25 +1316,6 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 				findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
 			}
 			progress.End()
-		} else if cfg.ScanFilters {
-			progress.StartCount("Scanning Jira filters for Team clauses")
-			if sourceClient == nil {
-				findings = append(findings, newFinding(SeverityError, "filter_scan_skipped", "Filter scan was requested but no source Jira base URL is available"))
-			} else {
-				rows, exportPath, artifact, scanFindings, _, err := scanFiltersWithClient(cfg, sourceClient, sourceTeams, func(current, total int) {
-					progress.UpdateCount(current, total)
-				})
-				state.FilterTeamClauseRows = rows
-				findings = append(findings, scanFindings...)
-				if err != nil {
-					findings = append(findings, newFinding(SeverityError, "filter_scan_failed", err.Error()))
-				} else if artifact != nil {
-					state.FilterScanExportPath = exportPath
-					state.Artifacts = replaceArtifact(state.Artifacts, *artifact)
-					findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
-				}
-			}
-			progress.End()
 		}
 
 		progress.Start("Writing generated identity mapping")
@@ -1486,19 +1467,7 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 	}
 
 	if len(state.FilterTeamClauseRows) == 0 && cfg.FilterTeamIDsInScope {
-		findings = append(findings, newFinding(SeverityError, "post_migrate_filter_input_missing", "Post-migrate phase needs the pre-migrate filter inventory export. Run pre-migrate first so the authoritative filter source is resolved and exported."))
-	} else if len(state.FilterTeamClauseRows) == 0 && cfg.ScanFilters && sourceClient != nil {
-		rows, exportPath, artifact, scanFindings, _, err := scanFiltersWithClient(cfg, sourceClient, state.SourceTeams, nil)
-		findings = append(findings, scanFindings...)
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_input_missing", fmt.Sprintf("Could not build filter Team-clause input for post-migrate: %v", err)))
-		} else {
-			state.FilterTeamClauseRows = rows
-			state.FilterScanExportPath = exportPath
-			if artifact != nil {
-				state.Artifacts = replaceArtifact(state.Artifacts, *artifact)
-			}
-		}
+		findings = append(findings, newFinding(SeverityError, "post_migrate_filter_input_missing", "Post-migrate phase needs the pre-migrate source filter export. Run pre-migrate first so the source list of filters with team IDs is resolved and exported."))
 	}
 
 	findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state)...)

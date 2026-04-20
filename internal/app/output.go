@@ -144,8 +144,6 @@ func printSummary(w io.Writer, report Report, reportPaths []string) {
 
 func summaryTitle(report Report) string {
 	switch report.Command {
-	case "plan":
-		return "Migration plan generated"
 	case "migrate":
 		switch reportPhase(report) {
 		case phasePreMigrate:
@@ -157,8 +155,6 @@ func summaryTitle(report Report) string {
 			return "Migrate phase dry run completed"
 		}
 		return "Migrate phase completed"
-	case "scan-filters":
-		return "Filter scan completed"
 	case "report":
 		return "Report exported"
 	default:
@@ -172,7 +168,7 @@ func summaryMode(report Report) string {
 		parts = append(parts, phase)
 	}
 	if report.DryRun {
-		parts = append(parts, "dry-run")
+		parts = append(parts, "preview")
 	} else if report.Command == "migrate" {
 		parts = append(parts, "apply")
 	}
@@ -1248,8 +1244,8 @@ func exitCodeFor(report Report) int {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: teams-migrator <init|plan|migrate|scan-filters|report|version|self-update|uninstall> [flags]")
-	fmt.Fprintln(w, "       teams-migrator config <show|path> [flags]")
+	fmt.Fprintln(w, "Usage: teams-migrator <init|migrate|report|version|self-update|uninstall> [flags]")
+	fmt.Fprintln(w, "       teams-migrator config <show> [flags]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --source-base-url       Source Jira base URL")
@@ -1263,21 +1259,20 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --persons-file          Path to source persons JSON export")
 	fmt.Fprintln(w, "  --resources-file        Path to source resources JSON export")
 	fmt.Fprintln(w, "  --issues-csv            Optional issues CSV")
-	fmt.Fprintln(w, "  --filter-source-csv     Source filter inventory CSV for authoritative pre-migrate filter resolution")
+	fmt.Fprintln(w, "  --filter-source-csv     CSV with source filters that contain team IDs for pre-migrate filter resolution")
 	fmt.Fprintln(w, "  --output-dir            Directory for generated reports")
-	fmt.Fprintln(w, "  --format                Report output: json or csv")
 	fmt.Fprintln(w, "  --team-scope            Team migration scope: all, shared-only, or non-shared-only")
 	fmt.Fprintln(w, "  --issue-project-scope   Issue correction scope: all or a comma-separated list of Jira project keys")
-	fmt.Fprintln(w, "  --scan-filters          Scan visible Jira filters for Team = {id|name} clauses")
 	fmt.Fprintln(w, "  --config                Path to config.yaml profile store")
 	fmt.Fprintln(w, "  --profile               Saved profile name")
 	fmt.Fprintln(w, "  --phase                 Migration phase for migrate: pre-migrate, migrate, or post-migrate")
-	fmt.Fprintln(w, "  --redacted              Kept for compatibility; config show no longer reads secrets from YAML")
 	fmt.Fprintln(w, "  --strict                Exit non-zero on warnings or errors")
-	fmt.Fprintln(w, "  --dry-run               Preview mutating operations")
-	fmt.Fprintln(w, "  --apply                 Disable dry-run for migrate")
+	fmt.Fprintln(w, "  --apply                 Execute writes for migrate")
 	fmt.Fprintln(w, "  --no-input              Disable interactive prompts")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Report command flags:")
 	fmt.Fprintln(w, "  --input                 Input report JSON for the report command")
+	fmt.Fprintln(w, "  --format                Report output: json or csv")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Environment:")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_SOURCE_BASE_URL")
@@ -1293,9 +1288,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_ISSUES_CSV")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_FILTER_SOURCE_CSV")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_OUTPUT_DIR")
-	fmt.Fprintln(w, "  TEAMS_MIGRATOR_REPORT_FORMAT")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_TEAM_SCOPE")
-	fmt.Fprintln(w, "  TEAMS_MIGRATOR_SCAN_FILTERS")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_STRICT")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_DRY_RUN")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_REPORT_INPUT")

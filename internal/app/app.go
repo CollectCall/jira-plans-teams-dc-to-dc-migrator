@@ -52,8 +52,6 @@ func Run(args []string) int {
 			return ExitFailure
 		}
 		return ExitSuccess
-	case "plan":
-		report = runPlan(cfg)
 	case "migrate":
 		if (runsMigratePhase(cfg.Command, cfg.Phase) || runsPostMigratePhase(cfg.Command, cfg.Phase)) && !cfg.DryRun && !cfg.NoInput && isInteractiveTerminal() {
 			state, findings := loadMigrationState(cfg)
@@ -79,8 +77,6 @@ func Run(args []string) int {
 			break
 		}
 		report = runMigrate(cfg)
-	case "scan-filters":
-		report = runScanFilters(cfg)
 	case "report":
 		report, err = runReport(cfg)
 		if err != nil {
@@ -92,9 +88,6 @@ func Run(args []string) int {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return ExitFailure
 		}
-		return ExitSuccess
-	case "config path":
-		fmt.Fprintln(os.Stdout, cfg.ConfigPath)
 		return ExitSuccess
 	case "config show":
 		if err := runConfigShow(cfg); err != nil {

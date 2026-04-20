@@ -71,35 +71,12 @@ func TestBuildTeamMappingsSharedOnlySkipsNonSharedTeams(t *testing.T) {
 }
 
 func TestParseConfigAcceptsTeamScope(t *testing.T) {
-	cfg, err := parseConfig([]string{"plan", "--no-input", "--team-scope", "non-shared-only"})
+	cfg, err := parseConfig([]string{"migrate", "--no-input", "--team-scope", "non-shared-only"})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
 	}
 	if cfg.TeamScope != "non-shared-only" {
 		t.Fatalf("expected team scope non-shared-only, got %q", cfg.TeamScope)
-	}
-}
-
-func TestParseConfigAcceptsScanFiltersCommand(t *testing.T) {
-	cfg, err := parseConfig([]string{"scan-filters", "--no-input", "--source-base-url", "https://source.example.com/jira"})
-	if err != nil {
-		t.Fatalf("parseConfig returned error: %v", err)
-	}
-	if cfg.Command != "scan-filters" {
-		t.Fatalf("expected command scan-filters, got %q", cfg.Command)
-	}
-}
-
-func TestParseConfigAcceptsScanFiltersFlag(t *testing.T) {
-	cfg, err := parseConfig([]string{"plan", "--no-input", "--source-base-url", "https://source.example.com/jira", "--scan-filters"})
-	if err != nil {
-		t.Fatalf("parseConfig returned error: %v", err)
-	}
-	if !cfg.ScanFilters {
-		t.Fatal("expected scan-filters to be enabled")
-	}
-	if !cfg.ScanFiltersExplicit {
-		t.Fatal("expected scan-filters to be marked explicit")
 	}
 }
 
@@ -149,7 +126,7 @@ func TestInteractivePhaseOutputTimestampIncludesPhaseSlug(t *testing.T) {
 }
 
 func TestParseConfigAcceptsIssueProjectScope(t *testing.T) {
-	cfg, err := parseConfig([]string{"plan", "--no-input", "--issue-project-scope", "abc,DEF", "--source-base-url", "https://source.example.com/jira", "--target-base-url", "https://target.example.com/jira"})
+	cfg, err := parseConfig([]string{"migrate", "--no-input", "--issue-project-scope", "abc,DEF", "--source-base-url", "https://source.example.com/jira", "--target-base-url", "https://target.example.com/jira"})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
 	}
@@ -329,16 +306,6 @@ func TestAssignProfileFieldParsesFilterScopeSettings(t *testing.T) {
 	if profile.FilterSourceCSV != "/tmp/source-filters.csv" {
 		t.Fatalf("expected filter source CSV to parse, got %q", profile.FilterSourceCSV)
 	}
-}
-
-func TestRequireCoreInputsErrorsWhenScanFiltersEnabledWithoutSourceURL(t *testing.T) {
-	findings := (Config{ScanFilters: true}).requireCoreInputs()
-	for _, finding := range findings {
-		if finding.Code == "missing_source_base_url_for_filter_scan" && finding.Severity == SeverityError {
-			return
-		}
-	}
-	t.Fatalf("expected missing_source_base_url_for_filter_scan error, got %#v", findings)
 }
 
 func TestRequireCoreInputsErrorsWhenPreMigrateApplyRequested(t *testing.T) {

@@ -8,51 +8,6 @@ import (
 	"testing"
 )
 
-func TestLoadAllFiltersFallsBackToFavouriteFiltersOnSearch404(t *testing.T) {
-	client, err := newJiraClient("https://example.test", "", "")
-	if err != nil {
-		t.Fatalf("newJiraClient returned error: %v", err)
-	}
-	client.httpClient = &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			switch req.URL.Path {
-			case "/rest/api/2/filter/search":
-				return &http.Response{
-					StatusCode: http.StatusNotFound,
-					Body:       io.NopCloser(strings.NewReader("not found")),
-					Header:     make(http.Header),
-				}, nil
-			case "/rest/api/2/filter/favourite":
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(`[{"id":"10000","name":"Favourite Filter","jql":"Team = 42"}]`)),
-					Header:     make(http.Header),
-				}, nil
-			default:
-				return &http.Response{
-					StatusCode: http.StatusNotFound,
-					Body:       io.NopCloser(strings.NewReader("not found")),
-					Header:     make(http.Header),
-				}, nil
-			}
-		}),
-	}
-
-	filters, findings, err := loadAllFilters(client, nil)
-	if err != nil {
-		t.Fatalf("loadAllFilters returned error: %v", err)
-	}
-	if len(filters) != 1 {
-		t.Fatalf("expected 1 filter, got %d", len(filters))
-	}
-	if filters[0].ID != "10000" || filters[0].Name != "Favourite Filter" {
-		t.Fatalf("unexpected filter payload: %#v", filters[0])
-	}
-	if len(findings) != 1 || findings[0].Code != "filter_search_endpoint_unsupported" {
-		t.Fatalf("expected fallback warning, got %#v", findings)
-	}
-}
-
 func TestVerifyTeamFilterScriptRunnerEndpointWithClientUsesResolvedFieldID(t *testing.T) {
 	client, err := newJiraClient("https://example.test/jira", "admin", "secret")
 	if err != nil {

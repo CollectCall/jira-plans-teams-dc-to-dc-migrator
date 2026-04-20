@@ -39,7 +39,7 @@ func completeConfigInteractively(cfg *Config) error {
 				Label:        "Report input JSON path",
 				Description:  "Provide the path to a previously generated JSON report that you want to re-render as JSON or CSV.",
 				InputHelp:    "Type a file path to an existing JSON report on disk.",
-				ArtifactInfo: "This is typically something like out/plan-report.json or out/migrate-report.json.",
+				ArtifactInfo: "This is typically something like out/migrate-report.json.",
 				Example:      "out/migrate-report.json",
 			})
 			if err != nil {
@@ -48,7 +48,7 @@ func completeConfigInteractively(cfg *Config) error {
 			cfg.ReportInput = value
 		}
 		return nil
-	case "plan", "migrate":
+		case "migrate":
 	default:
 		return nil
 	}
@@ -59,7 +59,7 @@ func completeConfigInteractively(cfg *Config) error {
 
 	wizard := newWizard("Teams Migrator", "Guided run setup")
 	wizard.intro([]string{
-		"This tool migrates Jira Teams and team membership between Server/Data Center instances.",
+		"This tool helps migrate teams used by Jira Advanced Roadmaps (formerly Portfolio, now called Plans in Cloud) between Server/Data Center instances, prepares mapping artifacts, and can fix related Jira references after migration.",
 	})
 	if cfg.Profile != "" {
 		wizard.note(fmt.Sprintf("Loaded defaults from saved profile %q.", cfg.Profile))
@@ -232,21 +232,6 @@ func completeConfigInteractively(cfg *Config) error {
 			return err
 		}
 		cfg.IssueProjectScope = value
-	}
-
-	if !cfg.ScanFiltersExplicit {
-		value, err := wizard.choice(wizardField{
-			Label:        "Scan filters as well",
-			Description:  "Choose whether this run should also do a best-effort scan of visible Jira filters for JQL clauses like Team = 123 or Team = \"Platform Team\".",
-			InputHelp:    "Type the number of your choice and press Enter.",
-			ArtifactInfo: "This Jira REST scan is a proof-of-concept inventory pass only. It is not a complete replacement for the ScriptRunner custom endpoint or DB-derived CSV used when team-ID filter rewrites are fully in scope.",
-			Default:      "no",
-		}, []string{"no", "yes"})
-		if err != nil {
-			return err
-		}
-		cfg.ScanFilters = value == "yes"
-		cfg.ScanFiltersExplicit = true
 	}
 
 	return nil
@@ -606,17 +591,6 @@ func runConfigInitWizard(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	format, err := wizard.choice(wizardField{
-		Label:       "Default report format",
-		Description: "Choose how reports should be written unless you override --format on a run.",
-		InputHelp:   "Type the number of your choice and press Enter.",
-		Default:     nonEmptyDefault(string(cfg.ReportFormat), "json"),
-	}, []string{"json", "csv"})
-	if err != nil {
-		return err
-	}
-	cfg.ReportFormat = ReportFormat(format)
-
 	teamScope, err := wizard.choice(wizardField{
 		Label:        "Default team migration scope",
 		Description:  "Choose whether this profile should migrate all teams, only shared teams, or only non-shared teams by default.",
@@ -685,9 +659,8 @@ func runConfigInitWizard(cfg Config) error {
 		"Profile saved",
 		fmt.Sprintf("Saved profile %q to %s", profileName, cfg.ConfigPath),
 		[]string{
-			fmt.Sprintf("Config path: ./bin/teams-migrator config path"),
 			fmt.Sprintf("Inspect profile: ./bin/teams-migrator config show --profile %s", profileName),
-			fmt.Sprintf("Next: ./bin/teams-migrator plan --profile %s", profileName),
+			fmt.Sprintf("Next: ./bin/teams-migrator migrate --profile %s", profileName),
 		},
 	)
 	return nil
@@ -919,7 +892,7 @@ func configureFilterTeamIDScope(wizard *wizardContext, cfg *Config) error {
 		Label:        "Filters using team IDs in scope",
 		Description:  "Choose whether post-migrate filter updates for Team-field IDs are part of this migration.",
 		InputHelp:    "Type the number of your choice and press Enter.",
-		ArtifactInfo: "If this is in scope, the pre-migrate phase needs a reliable inventory of filters whose JQL references team IDs so those IDs can be rewritten after destination teams are created.",
+		ArtifactInfo: "If this is in scope, the pre-migrate phase needs a reliable source list of filters whose JQL references team IDs so those IDs can be rewritten after destination teams are created.",
 		Default:      defaultYesNoChoice(cfg.FilterTeamIDsInScopeSet, cfg.FilterTeamIDsInScope, "no"),
 	}, []string{"no", "yes"})
 	if err != nil {
@@ -936,7 +909,7 @@ func configureFilterTeamIDScope(wizard *wizardContext, cfg *Config) error {
 	}
 
 	wizard.noteLines([]string{
-		"Jira does not provide a generic filter-search REST endpoint that can reliably inventory all filters whose JQL uses team IDs.",
+		"Jira does not provide a generic filter-search REST endpoint that can reliably find all filters whose JQL uses team IDs.",
 		"For full coverage, use either a ScriptRunner custom REST endpoint on the source Jira instance or a CSV produced from a database query.",
 		"The tool can resolve the Jira Teams custom field ID automatically when it has source Jira API access.",
 	})
@@ -957,15 +930,15 @@ func configureFilterTeamIDScope(wizard *wizardContext, cfg *Config) error {
 		cfg.FilterScriptRunnerInstalled = false
 		cfg.FilterScriptRunnerEndpoint = ""
 		wizard.noteLines([]string{
-			"Use a CSV generated from a database query for the filter inventory in this environment.",
+			"Use a CSV generated from a database query for the source list of filters in this environment.",
 			"Keep that CSV with the other pre-migrate artifacts so post-migrate can rewrite team IDs later.",
 			fmt.Sprintf("Example query: %s", filterInventoryCSVExampleQuery()),
 			fmt.Sprintf("If ScriptRunner becomes available later, the custom endpoint script in this repo is %s.", teamFilterScriptRunnerScriptPath),
 			"A published script URL still needs to be added.",
 		})
 		cfg.FilterSourceCSV, err = wizard.value(wizardField{
-			Label:        "Default source filter inventory CSV",
-			Description:  "This optional path points to a CSV exported from the Jira database query you will use for authoritative team-ID filter inventory.",
+			Label:        "Default source filter CSV",
+			Description:  "This optional path points to a CSV exported from the Jira database query you will use as the source list of filters that contain team IDs.",
 			InputHelp:    "Type the CSV path, or press Enter to leave it unset and provide --filter-source-csv per run.",
 			ArtifactInfo: "Expected columns: Filter ID, Filter Name, Owner, JQL. The tool will parse the JQL and generate the normalized pre-migration filter export from it.",
 			Example:      "/Users/you/migration/source-filters.csv",
@@ -994,7 +967,7 @@ func configureFilterTeamIDScope(wizard *wizardContext, cfg *Config) error {
 	if !cfg.FilterScriptRunnerInstalled {
 		cfg.FilterScriptRunnerEndpoint = ""
 		wizard.noteLines([]string{
-			"Install the ScriptRunner custom endpoint before running the authoritative pre-migrate filter inventory.",
+			"Install the ScriptRunner custom endpoint before running the pre-migrate source filter export.",
 			fmt.Sprintf("Current script source in this repo: %s", teamFilterScriptRunnerScriptPath),
 			"A published script URL still needs to be added.",
 		})
@@ -1082,7 +1055,6 @@ func profileSummary(cfg Config) string {
 	}
 	lines = append(lines, fmt.Sprintf("Target base URL: %s", cfg.TargetBaseURL))
 	lines = append(lines, fmt.Sprintf("Output dir: %s", cfg.OutputDir))
-	lines = append(lines, fmt.Sprintf("Report format: %s", cfg.ReportFormat))
 	lines = append(lines, fmt.Sprintf("Team scope: %s", cfg.TeamScope))
 	lines = append(lines, fmt.Sprintf("Issue correction project scope: %s", nonEmptyDefault(cfg.IssueProjectScope, "all")))
 	lines = append(lines, fmt.Sprintf("Team-ID filter updates in scope: %t", cfg.FilterTeamIDsInScope))
@@ -1117,7 +1089,7 @@ func confirmApplyAfterPreview() (bool, error) {
 	}
 	reader := bufio.NewReader(os.Stdin)
 	renderWizardSection("Teams Migrator | Apply", "Apply mode confirmation", []string{
-		"You have just seen the dry-run preview for the planned mappings and writes.",
+		"You have just seen the preview for the planned mappings and writes.",
 		"Apply mode will now create records on the target Jira instance where the plan marked them as add or created.",
 		"Non-shared teams cannot be created by this tool and must already exist in the destination plan before migration.",
 	}, "Type APPLY exactly to continue, or press Ctrl+C to cancel.", "", "", "Enter APPLY to continue. Ctrl+C cancels.")

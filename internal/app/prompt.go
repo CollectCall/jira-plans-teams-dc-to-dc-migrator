@@ -48,7 +48,7 @@ func completeConfigInteractively(cfg *Config) error {
 			cfg.ReportInput = value
 		}
 		return nil
-	case "validate", "plan", "migrate":
+	case "plan", "migrate":
 	default:
 		return nil
 	}
@@ -60,13 +60,12 @@ func completeConfigInteractively(cfg *Config) error {
 	wizard := newWizard("Teams Migrator", "Guided run setup")
 	wizard.intro([]string{
 		"This tool migrates Jira Teams and team membership between Server/Data Center instances.",
-		"The interface adapts to your terminal: richer styling when supported, plain mode when not.",
 	})
 	if cfg.Profile != "" {
 		wizard.note(fmt.Sprintf("Loaded defaults from saved profile %q.", cfg.Profile))
 	}
 
-	if cfg.IdentityMappingFile == "" {
+	if !cfg.IdentityMappingSet {
 		value, err := wizard.value(wizardField{
 			Label:        "Identity mapping CSV",
 			Description:  "This optional file connects source users to target users so team membership can be rebuilt correctly.",
@@ -79,6 +78,7 @@ func completeConfigInteractively(cfg *Config) error {
 			return err
 		}
 		cfg.IdentityMappingFile = value
+		cfg.IdentityMappingSet = true
 	}
 
 	sourceMode := inferSourceMode(*cfg)
@@ -187,6 +187,25 @@ func completeConfigInteractively(cfg *Config) error {
 		}
 	}
 
+	if cfg.Command == "migrate" && !cfg.PhaseExplicit {
+		value, err := wizard.choice(wizardField{
+			Label:       "Migration phase",
+			Description: "Choose the next phase to run. Pre-migrate gathers comparison data, migrate performs destination writes, and post-migrate handles Jira field rewrites after team IDs already exist in the destination.",
+			InputHelp:   "Type the number of your choice and press Enter.",
+			ArtifactInfo: strings.Join([]string{
+				"pre-migrate: fetch source/target data and generate comparison artifacts only.",
+				"migrate: create destination teams and memberships from the current mappings.",
+				"post-migrate: requires destination teams to already exist and rewrites issue/filter team IDs in the target Jira.",
+			}, " "),
+			Default: defaultMigrationPhase(cfg.Command),
+		}, availableMigrationPhases(*cfg))
+		if err != nil {
+			return err
+		}
+		cfg.Phase = value
+		cfg.PhaseExplicit = true
+	}
+
 	if cfg.TeamScope == "" || cfg.TeamScope == "all" {
 		value, err := wizard.choice(wizardField{
 			Label:        "Team migration scope",
@@ -201,12 +220,26 @@ func completeConfigInteractively(cfg *Config) error {
 		cfg.TeamScope = value
 	}
 
+	if strings.TrimSpace(cfg.IssueProjectScope) == "" || strings.EqualFold(strings.TrimSpace(cfg.IssueProjectScope), "all") {
+		value, err := wizard.value(wizardField{
+			Label:        "Issue correction project scope",
+			Description:  "Choose which Jira projects should be in scope for issue-based correction exports and post-migrate rewrites.",
+			InputHelp:    "Type all, or a comma-separated list like ABC,DEF.",
+			ArtifactInfo: "This scope is applied to issue/team and Parent Link correction flows. Filters are not project-scoped.",
+			Default:      nonEmptyDefault(cfg.IssueProjectScope, "all"),
+		})
+		if err != nil {
+			return err
+		}
+		cfg.IssueProjectScope = value
+	}
+
 	if !cfg.ScanFiltersExplicit {
 		value, err := wizard.choice(wizardField{
 			Label:        "Scan filters as well",
-			Description:  "Choose whether this run should also scan visible Jira filters for JQL clauses like Team = 123 or Team = \"Platform Team\".",
+			Description:  "Choose whether this run should also do a best-effort scan of visible Jira filters for JQL clauses like Team = 123 or Team = \"Platform Team\".",
 			InputHelp:    "Type the number of your choice and press Enter.",
-			ArtifactInfo: "This is an extra source-side inventory pass. It can help find filter JQL that must be updated later, but it adds latency to the run.",
+			ArtifactInfo: "This Jira REST scan is a proof-of-concept inventory pass only. It is not a complete replacement for the ScriptRunner custom endpoint or DB-derived CSV used when team-ID filter rewrites are fully in scope.",
 			Default:      "no",
 		}, []string{"no", "yes"})
 		if err != nil {
@@ -214,6 +247,164 @@ func completeConfigInteractively(cfg *Config) error {
 		}
 		cfg.ScanFilters = value == "yes"
 		cfg.ScanFiltersExplicit = true
+	}
+
+	return nil
+}
+
+func completeMigrateSessionInteractively(cfg *Config) error {
+	if !isInteractiveTerminal() {
+		return nil
+	}
+
+	wizard := newWizard("Teams Migrator", "Guided migrate run")
+	introLines := []string{
+		"This tool walks through pre-migrate, migrate, and post-migrate without re-asking saved answers.",
+	}
+	if cfg.Profile != "" {
+		introLines = append(introLines, fmt.Sprintf("Loaded defaults from saved profile %q.", cfg.Profile))
+	}
+	wizard.intro(introLines)
+
+	if !cfg.PhaseExplicit {
+		value, err := wizard.choice(wizardField{
+			Label:       "Start or continue at",
+			Description: "Choose where this run should start. The same in-memory credentials and answers will be reused if you continue to the next phase.",
+			InputHelp:   "Type the number of your choice and press Enter.",
+			ArtifactInfo: strings.Join([]string{
+				"pre-migrate: fetch source/target data and generate comparison artifacts only.",
+				"migrate: preview and then create destination teams.",
+				"post-migrate: preview and then apply Jira issue/filter corrections after destination teams already exist.",
+			}, " "),
+			Default: defaultMigrationPhase(cfg.Command),
+		}, availableMigrationPhases(*cfg))
+		if err != nil {
+			return err
+		}
+		cfg.Phase = value
+		cfg.PhaseExplicit = true
+	}
+
+	if !cfg.IdentityMappingSet {
+		value, err := wizard.value(wizardField{
+			Label:        "Identity mapping CSV",
+			Description:  "This optional file connects source users to target users so team membership can be rebuilt correctly.",
+			InputHelp:    "Type the path to an existing CSV file on disk, or press Enter to skip it.",
+			ArtifactInfo: "If you skip this, the tool will try to auto-resolve mappings by matching identical source and target emails and will generate a reviewable mapping artifact.",
+			Example:      "/Users/you/migration/identity-mapping.csv",
+			Optional:     true,
+		})
+		if err != nil {
+			return err
+		}
+		cfg.IdentityMappingFile = value
+		cfg.IdentityMappingSet = true
+	}
+
+	sourceMode := inferSourceMode(*cfg)
+	if sourceMode == "" {
+		value, err := wizard.choice(wizardField{
+			Label:        "Source data mode",
+			Description:  "Choose whether source teams/persons/resources should come from exported JSON files or directly from the source Jira API.",
+			ArtifactInfo: "File mode is easier for a first dry run. API mode is needed for live reads and issue-field discovery.",
+			Default:      "file",
+		}, []string{"file", "api"})
+		if err != nil {
+			return err
+		}
+		sourceMode = value
+	}
+
+	if sourceMode == "file" {
+		var err error
+		if cfg.TeamsFile == "" {
+			cfg.TeamsFile, err = wizard.value(wizardField{
+				Label:        "Source teams JSON",
+				Description:  "This artifact contains the exported source teams dataset.",
+				InputHelp:    "Type the path to an existing JSON file on disk.",
+				ArtifactInfo: "The file should contain the payload returned by GET /team or an array of TeamDTO records.",
+				Example:      "/path/to/teams.json",
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if cfg.PersonsFile == "" {
+			cfg.PersonsFile, err = wizard.value(wizardField{
+				Label:        "Source persons JSON",
+				Description:  "This artifact contains the exported source persons dataset.",
+				InputHelp:    "Type the path to an existing JSON file on disk.",
+				ArtifactInfo: "The file should contain the payload returned by GET /person or an array of PersonDTO records.",
+				Example:      "/path/to/persons.json",
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if cfg.ResourcesFile == "" {
+			cfg.ResourcesFile, err = wizard.value(wizardField{
+				Label:        "Source resources JSON",
+				Description:  "This artifact contains the exported source team membership dataset.",
+				InputHelp:    "Type the path to an existing JSON file on disk.",
+				ArtifactInfo: "The file should contain the payload returned by GET /resource or an array of ResourceDTO records.",
+				Example:      "/path/to/resources.json",
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if cfg.SourceBaseURL == "" {
+			cfg.SourceBaseURL, err = wizard.value(wizardField{
+				Label:        "Optional source Jira base URL",
+				Description:  "This is optional in file mode, but recommended if the run needs Jira issue-field discovery or correction exports.",
+				InputHelp:    "Type the Jira base URL, or press Enter to skip.",
+				ArtifactInfo: "If provided, the tool can discover Jira issue fields and generate pre- and post-migration correction exports.",
+				Example:      "https://source.example.com/jira",
+				Optional:     true,
+			})
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		var err error
+		if cfg.SourceBaseURL == "" {
+			cfg.SourceBaseURL, err = wizard.value(wizardField{
+				Label:        "Source Jira base URL",
+				Description:  "This is the Jira Server/Data Center instance the tool will read from.",
+				InputHelp:    "Type the Jira base URL. Do not include /rest/teams-api/1.0.",
+				ArtifactInfo: "The Teams API path is added automatically.",
+				Example:      "https://source.example.com/jira",
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if sourceNeedsAuth(*cfg) {
+		if err := promptForAuth(wizard, "source", &cfg.SourceUsername, &cfg.SourcePassword); err != nil {
+			return err
+		}
+	}
+
+	if cfg.TargetBaseURL == "" {
+		value, err := wizard.value(wizardField{
+			Label:        "Target Jira base URL",
+			Description:  "This is the Jira Server/Data Center instance the tool will write to in apply mode.",
+			InputHelp:    "Type the Jira base URL. Do not include /rest/teams-api/1.0.",
+			ArtifactInfo: "The tool deduplicates teams here and, in apply mode, creates teams and resources here.",
+			Example:      "https://target.example.com/jira",
+		})
+		if err != nil {
+			return err
+		}
+		cfg.TargetBaseURL = value
+	}
+	if targetNeedsAuth(*cfg) {
+		if err := promptForAuth(wizard, "target", &cfg.TargetUsername, &cfg.TargetPassword); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -268,19 +459,19 @@ func inferSourceModeOrDefault(cfg Config) string {
 }
 
 func sourceNeedsAuth(cfg Config) bool {
-	return cfg.SourceBaseURL != "" && cfg.SourceUsername == ""
+	return strings.TrimSpace(cfg.SourceBaseURL) != "" && (strings.TrimSpace(cfg.SourceUsername) == "" || strings.TrimSpace(cfg.SourcePassword) == "")
 }
 
 func targetNeedsAuth(cfg Config) bool {
-	return cfg.TargetBaseURL != "" && cfg.TargetUsername == ""
+	return strings.TrimSpace(cfg.TargetBaseURL) != "" && (strings.TrimSpace(cfg.TargetUsername) == "" || strings.TrimSpace(cfg.TargetPassword) == "")
 }
 
 func runConfigInitWizard(cfg Config) error {
 	if cfg.NoInput {
-		return errors.New("config init requires interactive input; remove --no-input")
+		return errors.New("init requires interactive input; remove --no-input")
 	}
 	if !isInteractiveTerminal() {
-		return errors.New("config init requires a terminal")
+		return errors.New("init requires a terminal")
 	}
 
 	store, err := loadProfileStore(cfg.ConfigPath)
@@ -288,7 +479,7 @@ func runConfigInitWizard(cfg Config) error {
 		return err
 	}
 
-	wizard := newWizard("Teams Migrator", "Config init")
+	wizard := newWizard("Teams Migrator", "Init")
 	wizard.intro([]string{
 		"This wizard creates or updates a reusable profile for future runs.",
 		"Usernames and passwords are not stored in the profile. The CLI prompts for them at runtime when needed.",
@@ -318,6 +509,7 @@ func runConfigInitWizard(cfg Config) error {
 	if err != nil {
 		return err
 	}
+	cfg.IdentityMappingSet = true
 
 	sourceMode, err := wizard.choice(wizardField{
 		Label:        "Default source mode",
@@ -437,6 +629,25 @@ func runConfigInitWizard(cfg Config) error {
 	}
 	cfg.TeamScope = teamScope
 
+	issueProjectScope, err := wizard.value(wizardField{
+		Label:        "Default issue correction project scope",
+		Description:  "Choose which Jira projects should be in scope for issue-based correction exports and post-migrate rewrites by default.",
+		InputHelp:    "Type all, or a comma-separated list like ABC,DEF.",
+		ArtifactInfo: "This scope applies to issue/team and Parent Link correction flows. Filters are not project-scoped.",
+		Default:      nonEmptyDefault(cfg.IssueProjectScope, "all"),
+	})
+	if err != nil {
+		return err
+	}
+	cfg.IssueProjectScope = issueProjectScope
+
+	if err := configureFilterTeamIDScope(wizard, &cfg); err != nil {
+		return err
+	}
+	if err := configureParentLinkScope(wizard, &cfg); err != nil {
+		return err
+	}
+
 	setCurrent, err := wizard.choice(wizardField{
 		Label:       "Set as current profile",
 		Description: "If set to yes, this profile becomes the default when you run teams-migrator without --profile.",
@@ -463,7 +674,7 @@ func runConfigInitWizard(cfg Config) error {
 	}, "yes"); err != nil {
 		return err
 	} else if !ok {
-		return errors.New("config init cancelled")
+		return errors.New("init cancelled")
 	}
 
 	if err := saveProfileStore(cfg.ConfigPath, store); err != nil {
@@ -483,23 +694,27 @@ func runConfigInitWizard(cfg Config) error {
 }
 
 func promptForAuth(wizard *wizardContext, label string, username, password *string) error {
-	user, err := wizard.value(wizardField{
-		Label:       fmt.Sprintf("%s username", titleCase(label)),
-		Description: fmt.Sprintf("Enter the username for basic authentication against the %s Jira instance.", label),
-	})
-	if err != nil {
-		return err
+	if strings.TrimSpace(*username) == "" {
+		user, err := wizard.value(wizardField{
+			Label:       fmt.Sprintf("%s username", titleCase(label)),
+			Description: fmt.Sprintf("Enter the username for basic authentication against the %s Jira instance.", label),
+		})
+		if err != nil {
+			return err
+		}
+		*username = user
 	}
-	pass, err := wizard.secret(wizardField{
-		Label:       fmt.Sprintf("%s password", titleCase(label)),
-		Description: fmt.Sprintf("Enter the password for basic authentication against the %s Jira instance.", label),
-		InputHelp:   "Type the password value. Input is hidden.",
-	})
-	if err != nil {
-		return err
+	if strings.TrimSpace(*password) == "" {
+		pass, err := wizard.secret(wizardField{
+			Label:       fmt.Sprintf("%s password", titleCase(label)),
+			Description: fmt.Sprintf("Enter the password for basic authentication against the %s Jira instance.", label),
+			InputHelp:   "Type the password value. Input is hidden.",
+		})
+		if err != nil {
+			return err
+		}
+		*password = pass
 	}
-	*username = user
-	*password = pass
 	return nil
 }
 
@@ -517,6 +732,11 @@ func (w *wizardContext) intro(lines []string) {
 
 func (w *wizardContext) note(message string) {
 	renderWizardSection(w.Title, "Note", []string{message}, "", "", "", "Press Enter to continue.")
+	_, _ = w.Reader.ReadString('\n')
+}
+
+func (w *wizardContext) noteLines(lines []string) {
+	renderWizardSection(w.Title, "Note", lines, "", "", "", "Press Enter to continue.")
 	_, _ = w.Reader.ReadString('\n')
 }
 
@@ -674,6 +894,176 @@ func nonEmptyDefault(value, fallback string) string {
 	return fallback
 }
 
+func defaultYesNoChoice(valueSet, value bool, fallback string) string {
+	if !valueSet {
+		return fallback
+	}
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
+func defaultFilterTeamDataSource(cfg Config) string {
+	if normalized := normalizeFilterDataSource(cfg.FilterDataSource); normalized != "" {
+		return normalized
+	}
+	if cfg.FilterScriptRunnerInstalled {
+		return filterDataSourceScriptRunner
+	}
+	return filterDataSourceDatabaseCSV
+}
+
+func configureFilterTeamIDScope(wizard *wizardContext, cfg *Config) error {
+	inScope, err := wizard.choice(wizardField{
+		Label:        "Filters using team IDs in scope",
+		Description:  "Choose whether post-migrate filter updates for Team-field IDs are part of this migration.",
+		InputHelp:    "Type the number of your choice and press Enter.",
+		ArtifactInfo: "If this is in scope, the pre-migrate phase needs a reliable inventory of filters whose JQL references team IDs so those IDs can be rewritten after destination teams are created.",
+		Default:      defaultYesNoChoice(cfg.FilterTeamIDsInScopeSet, cfg.FilterTeamIDsInScope, "no"),
+	}, []string{"no", "yes"})
+	if err != nil {
+		return err
+	}
+
+	cfg.FilterTeamIDsInScope = inScope == "yes"
+	cfg.FilterTeamIDsInScopeSet = true
+	if !cfg.FilterTeamIDsInScope {
+		cfg.FilterDataSource = ""
+		cfg.FilterScriptRunnerInstalled = false
+		cfg.FilterScriptRunnerEndpoint = ""
+		return nil
+	}
+
+	wizard.noteLines([]string{
+		"Jira does not provide a generic filter-search REST endpoint that can reliably inventory all filters whose JQL uses team IDs.",
+		"For full coverage, use either a ScriptRunner custom REST endpoint on the source Jira instance or a CSV produced from a database query.",
+		"The tool can resolve the Jira Teams custom field ID automatically when it has source Jira API access.",
+	})
+
+	hasScriptRunner, err := wizard.choice(wizardField{
+		Label:        "Expose ScriptRunner custom endpoint",
+		Description:  "Choose whether to expose a ScriptRunner custom REST endpoint for filter discovery.",
+		InputHelp:    "Type the number of your choice and press Enter.",
+		ArtifactInfo: "This requires ScriptRunner for Jira to be installed on the source Jira instance. If you choose no, supply a CSV generated from a database query instead.",
+		Default:      defaultYesNoChoice(cfg.FilterDataSource != "", defaultFilterTeamDataSource(*cfg) == filterDataSourceScriptRunner, "yes"),
+	}, []string{"yes", "no"})
+	if err != nil {
+		return err
+	}
+
+	if hasScriptRunner == "no" {
+		cfg.FilterDataSource = filterDataSourceDatabaseCSV
+		cfg.FilterScriptRunnerInstalled = false
+		cfg.FilterScriptRunnerEndpoint = ""
+		wizard.noteLines([]string{
+			"Use a CSV generated from a database query for the filter inventory in this environment.",
+			"Keep that CSV with the other pre-migrate artifacts so post-migrate can rewrite team IDs later.",
+			fmt.Sprintf("Example query: %s", filterInventoryCSVExampleQuery()),
+			fmt.Sprintf("If ScriptRunner becomes available later, the custom endpoint script in this repo is %s.", teamFilterScriptRunnerScriptPath),
+			"A published script URL still needs to be added.",
+		})
+		cfg.FilterSourceCSV, err = wizard.value(wizardField{
+			Label:        "Default source filter inventory CSV",
+			Description:  "This optional path points to a CSV exported from the Jira database query you will use for authoritative team-ID filter inventory.",
+			InputHelp:    "Type the CSV path, or press Enter to leave it unset and provide --filter-source-csv per run.",
+			ArtifactInfo: "Expected columns: Filter ID, Filter Name, Owner, JQL. The tool will parse the JQL and generate the normalized pre-migration filter export from it.",
+			Example:      "/Users/you/migration/source-filters.csv",
+			Default:      cfg.FilterSourceCSV,
+			Optional:     true,
+		})
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	cfg.FilterDataSource = filterDataSourceScriptRunner
+	installed, err := wizard.choice(wizardField{
+		Label:        "Custom filter endpoint installed",
+		Description:  "Choose whether the custom ScriptRunner endpoint for team-ID filter discovery is already installed on the source Jira instance.",
+		InputHelp:    "Type the number of your choice and press Enter.",
+		ArtifactInfo: "The expected endpoint path is /rest/scriptrunner/latest/custom/findTeamFiltersDB and it requires the resolved Jira Teams custom field ID.",
+		Default:      defaultYesNoChoice(cfg.FilterDataSource == filterDataSourceScriptRunner, cfg.FilterScriptRunnerInstalled, "yes"),
+	}, []string{"yes", "no"})
+	if err != nil {
+		return err
+	}
+
+	cfg.FilterScriptRunnerInstalled = installed == "yes"
+	if !cfg.FilterScriptRunnerInstalled {
+		cfg.FilterScriptRunnerEndpoint = ""
+		wizard.noteLines([]string{
+			"Install the ScriptRunner custom endpoint before running the authoritative pre-migrate filter inventory.",
+			fmt.Sprintf("Current script source in this repo: %s", teamFilterScriptRunnerScriptPath),
+			"A published script URL still needs to be added.",
+		})
+		return nil
+	}
+
+	return verifyConfiguredScriptRunnerFilterEndpoint(wizard, cfg)
+}
+
+func configureParentLinkScope(wizard *wizardContext, cfg *Config) error {
+	inScope, err := wizard.choice(wizardField{
+		Label:        "Parent Link corrections in scope",
+		Description:  "Choose whether Parent Link issue references should be exported pre-migrate and corrected post-migrate.",
+		InputHelp:    "Type the number of your choice and press Enter.",
+		ArtifactInfo: "Parent Link corrections use source parent issue keys to resolve the new target parent issue IDs before updating child issues in the target Jira.",
+		Default:      defaultYesNoChoice(cfg.ParentLinkInScopeSet, cfg.ParentLinkInScope, "no"),
+	}, []string{"no", "yes"})
+	if err != nil {
+		return err
+	}
+	cfg.ParentLinkInScope = inScope == "yes"
+	cfg.ParentLinkInScopeSet = true
+	return nil
+}
+
+func verifyConfiguredScriptRunnerFilterEndpoint(wizard *wizardContext, cfg *Config) error {
+	if strings.TrimSpace(cfg.SourceBaseURL) == "" {
+		cfg.FilterScriptRunnerEndpoint = ""
+		wizard.noteLines([]string{
+			"Skipping ScriptRunner endpoint verification because this profile does not have a source Jira base URL yet.",
+			fmt.Sprintf("Expected path: {{jira-url}}%s?enabled=true&lastId=0&limit=500&teamFieldId=<resolved Teams field ID>", teamFilterScriptRunnerEndpointPath),
+			"The tool can resolve the field ID automatically later when source Jira API access is configured.",
+		})
+		return nil
+	}
+
+	wizard.noteLines([]string{
+		"Endpoint verification uses temporary source Jira credentials and does not store them in the saved profile.",
+		"The ScriptRunner endpoint itself requires Jira admin permission.",
+	})
+
+	var username string
+	var password string
+	if err := promptForAuth(wizard, "source verification", &username, &password); err != nil {
+		return err
+	}
+
+	endpointURL, fieldLabel, err := verifyTeamFilterScriptRunnerEndpoint(cfg.SourceBaseURL, username, password)
+	if err != nil {
+		cfg.FilterScriptRunnerEndpoint = ""
+		wizard.noteLines([]string{
+			"Could not verify the ScriptRunner filter endpoint yet.",
+			err.Error(),
+			fmt.Sprintf("Expected path: {{jira-url}}%s?enabled=true&lastId=0&limit=500&teamFieldId=<resolved Teams field ID>", teamFilterScriptRunnerEndpointPath),
+			fmt.Sprintf("Current script source in this repo: %s", teamFilterScriptRunnerScriptPath),
+			"A published script URL still needs to be added.",
+		})
+		return nil
+	}
+
+	cfg.FilterScriptRunnerEndpoint = endpointURL
+	wizard.noteLines([]string{
+		"Verified the ScriptRunner custom endpoint for team-ID filter discovery.",
+		fmt.Sprintf("Resolved Teams field: %s", fieldLabel),
+		fmt.Sprintf("Verified endpoint: %s", endpointURL),
+	})
+	return nil
+}
+
 func profileSummary(cfg Config) string {
 	lines := []string{
 		fmt.Sprintf("Profile: %s", cfg.Profile),
@@ -694,6 +1084,21 @@ func profileSummary(cfg Config) string {
 	lines = append(lines, fmt.Sprintf("Output dir: %s", cfg.OutputDir))
 	lines = append(lines, fmt.Sprintf("Report format: %s", cfg.ReportFormat))
 	lines = append(lines, fmt.Sprintf("Team scope: %s", cfg.TeamScope))
+	lines = append(lines, fmt.Sprintf("Issue correction project scope: %s", nonEmptyDefault(cfg.IssueProjectScope, "all")))
+	lines = append(lines, fmt.Sprintf("Team-ID filter updates in scope: %t", cfg.FilterTeamIDsInScope))
+	lines = append(lines, fmt.Sprintf("Parent Link corrections in scope: %t", cfg.ParentLinkInScope))
+	if cfg.FilterTeamIDsInScope {
+		lines = append(lines, fmt.Sprintf("Filter data source: %s", nonEmptyDefault(cfg.FilterDataSource, "not configured")))
+		if cfg.FilterDataSource == filterDataSourceDatabaseCSV && cfg.FilterSourceCSV != "" {
+			lines = append(lines, fmt.Sprintf("Filter source CSV: %s", cfg.FilterSourceCSV))
+		}
+		if cfg.FilterDataSource == filterDataSourceScriptRunner {
+			lines = append(lines, fmt.Sprintf("ScriptRunner endpoint installed: %t", cfg.FilterScriptRunnerInstalled))
+			if cfg.FilterScriptRunnerEndpoint != "" {
+				lines = append(lines, fmt.Sprintf("Verified ScriptRunner endpoint: %s", cfg.FilterScriptRunnerEndpoint))
+			}
+		}
+	}
 	lines = append(lines, "Credentials: prompted at runtime")
 	return strings.Join(lines, "\n")
 }
@@ -721,6 +1126,113 @@ func confirmApplyAfterPreview() (bool, error) {
 		return false, err
 	}
 	return strings.TrimSpace(value) == "APPLY", nil
+}
+
+func promptProceedToPostMigrationCorrections() (bool, error) {
+	if !isInteractiveTerminal() {
+		return false, nil
+	}
+	reader := bufio.NewReader(os.Stdin)
+	renderWizardSection("Teams Migrator | Post-migrate", "Proceed to post-migration corrections?", []string{
+		"The migrate phase summary above shows the final destination team IDs and prepared correction inputs.",
+		"Continue now to review the prepared post-migration correction files, or stop here and run post-migrate later.",
+	}, "Type yes to continue now, or press Enter to do this later and close the tool.", "", "", "Default: later. Ctrl+C cancels.")
+	value, err := readLine(reader, "no")
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func promptContinueToMigrationPhase(nextPhase string) (bool, error) {
+	if !isInteractiveTerminal() {
+		return false, nil
+	}
+	reader := bufio.NewReader(os.Stdin)
+	nextLabel := nextPhase
+	switch nextPhase {
+	case phaseMigrate:
+		nextLabel = "migrate"
+	case phasePostMigrate:
+		nextLabel = "post-migrate"
+	}
+	renderWizardSection("Teams Migrator | Continue", fmt.Sprintf("Continue to %s now?", titleCase(nextLabel)), []string{
+		fmt.Sprintf("The current phase completed successfully."),
+		fmt.Sprintf("Continue now to the %s phase using the same in-memory credentials and saved scope, or stop here and resume later.", nextLabel),
+	}, "Type yes to continue now, or press Enter to stop here.", "", "", "Default: stop here. Ctrl+C cancels.")
+	value, err := readLine(reader, "no")
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func showPreparedPostMigrationFilesPreview(state migrationState) error {
+	if !isInteractiveTerminal() {
+		return nil
+	}
+
+	lines := []string{
+		"The migrate phase prepared the following files for post-migration corrections:",
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "migration_team_id_mapping"); ok {
+		lines = append(lines, fmt.Sprintf("Migration team ID mapping: %s", artifact.Path))
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_issue_team_mapping"); ok {
+		lines = append(lines, fmt.Sprintf("Issue/team correction mapping: %s", artifact.Path))
+	} else {
+		lines = append(lines, "Issue/team correction mapping: not prepared")
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_target_issue_snapshot"); ok {
+		lines = append(lines, fmt.Sprintf("Target issue snapshot: %s", artifact.Path))
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_issue_comparison"); ok {
+		lines = append(lines, fmt.Sprintf("Issue comparison export: %s", artifact.Path))
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_parent_link_mapping"); ok {
+		lines = append(lines, fmt.Sprintf("Parent-link correction mapping: %s", artifact.Path))
+	} else if len(state.ParentLinkRows) > 0 {
+		lines = append(lines, "Parent-link correction mapping: not prepared")
+	} else {
+		lines = append(lines, "Parent-link correction mapping: not in scope or no pre-migrate parent-link export was available")
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_target_parent_link_snapshot"); ok {
+		lines = append(lines, fmt.Sprintf("Target Parent Link snapshot: %s", artifact.Path))
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_parent_link_comparison"); ok {
+		lines = append(lines, fmt.Sprintf("Parent-link comparison export: %s", artifact.Path))
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_filter_team_mapping"); ok {
+		lines = append(lines, fmt.Sprintf("Filter/team correction mapping: %s", artifact.Path))
+	} else if len(state.FilterTeamClauseRows) > 0 {
+		lines = append(lines, "Filter/team correction mapping: not prepared")
+	} else {
+		lines = append(lines, "Filter/team correction mapping: not in scope or no pre-migrate filter export was available")
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_target_filter_snapshot"); ok {
+		lines = append(lines, fmt.Sprintf("Target filter snapshot: %s", artifact.Path))
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_filter_target_match"); ok {
+		lines = append(lines, fmt.Sprintf("Filter target match export: %s", artifact.Path))
+	}
+	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_filter_comparison"); ok {
+		lines = append(lines, fmt.Sprintf("Filter JQL comparison export: %s", artifact.Path))
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	renderWizardSection("Teams Migrator | Post-migrate", "Prepared correction files", lines, "", "", "", "Press Enter to continue to the post-migration preview. Ctrl+C cancels.")
+	_, err := readLine(reader, "")
+	return err
 }
 
 func promptForSelfUpdate(latest string) (bool, error) {

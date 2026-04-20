@@ -2,7 +2,11 @@ package app
 
 import (
 	"encoding/csv"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -10,6 +14,33 @@ import (
 )
 
 const filterAPIMaxPageSize = 100
+
+const teamFilterScriptRunnerPageSize = 500
+
+type teamFilterScriptRunnerResponse struct {
+	Meta struct {
+		LastID          int64  `json:"lastId"`
+		NextLastID      int64  `json:"nextLastId"`
+		Scanned         int    `json:"scanned"`
+		Matched         int    `json:"matched"`
+		ParseErrorCount int    `json:"parseErrorCount"`
+		Limit           int    `json:"limit"`
+		DBMode          string `json:"dbMode"`
+	} `json:"meta"`
+	Results []struct {
+		ID    int64  `json:"id"`
+		Name  string `json:"name"`
+		Owner string `json:"owner"`
+		JQL   string `json:"jql"`
+	} `json:"results"`
+	ParseErrors []teamFilterParseError `json:"parseErrors"`
+}
+
+type teamFilterParseError struct {
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Error string `json:"error"`
+}
 
 var teamEqualsClausePattern = regexp.MustCompile(`(?i)(?:"?team"?|\bteam\b)\s*=\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.:-]+))`)
 
@@ -23,6 +54,10 @@ func runScanFilters(cfg Config) Report {
 
 func executeFilterScan(cfg Config) (migrationState, []Finding, []Action) {
 	return executeFilterScanWithProgress(cfg, nil)
+}
+
+func filterInventoryCSVExampleQuery() string {
+	return `SELECT id AS "Filter ID", filtername AS "Filter Name", authorname AS "Owner", reqcontent AS "JQL" FROM searchrequest WHERE reqcontent IS NOT NULL AND (LOWER(reqcontent) LIKE '%team%' OR LOWER(reqcontent) LIKE '%cf[%') ORDER BY id;`
 }
 
 func executeFilterScanWithProgress(cfg Config, progress *progressTracker) (migrationState, []Finding, []Action) {
@@ -56,11 +91,12 @@ func executeFilterScanWithProgress(cfg Config, progress *progressTracker) (migra
 		defer progress.End()
 	}
 
-	filters, err := loadAllFilters(sourceClient, countProgressReporter(progress))
+	filters, filterFindings, err := loadAllFilters(sourceClient, countProgressReporter(progress))
 	if err != nil {
 		findings = append(findings, newFinding(SeverityError, "source_filters_load", err.Error()))
 		return state, findings, nil
 	}
+	findings = append(findings, filterFindings...)
 
 	rows := buildFilterTeamClauseRows(filters, sourceTeams)
 	exportPath, artifact, scanFindings, scanActions, err := finalizeFilterScan(cfg, filters, rows)
@@ -78,21 +114,217 @@ func executeFilterScanWithProgress(cfg Config, progress *progressTracker) (migra
 }
 
 func scanFiltersWithClient(cfg Config, client *jiraClient, teams []TeamDTO, progress func(current, total int)) ([]FilterTeamClauseRow, string, *Artifact, []Finding, []Action, error) {
-	filters, err := loadAllFilters(client, progress)
+	filters, findings, err := loadAllFilters(client, progress)
 	if err != nil {
 		return nil, "", nil, nil, nil, err
 	}
 	rows := buildFilterTeamClauseRows(filters, teams)
-	path, artifact, findings, actions, err := finalizeFilterScan(cfg, filters, rows)
+	path, artifact, scanFindings, actions, err := finalizeFilterScan(cfg, filters, rows)
+	findings = append(findings, scanFindings...)
 	return rows, path, artifact, findings, actions, err
 }
 
-func loadAllFilters(client *jiraClient, progress func(current, total int)) ([]JiraFilter, error) {
+func scanFiltersWithConfiguredSource(cfg Config, client *jiraClient, teams []TeamDTO, progress func(current, total int)) ([]FilterTeamClauseRow, string, *Artifact, []Finding, error) {
+	switch normalizeFilterDataSource(cfg.FilterDataSource) {
+	case filterDataSourceScriptRunner:
+		return scanFiltersWithScriptRunner(cfg, client, teams, progress)
+	case filterDataSourceDatabaseCSV:
+		return scanFiltersWithSourceCSV(cfg, teams)
+	default:
+		return nil, "", nil, nil, fmt.Errorf("unsupported filter data source %q", cfg.FilterDataSource)
+	}
+}
+
+func scanFiltersWithScriptRunner(cfg Config, client *jiraClient, teams []TeamDTO, progress func(current, total int)) ([]FilterTeamClauseRow, string, *Artifact, []Finding, error) {
+	if client == nil {
+		return nil, "", nil, nil, fmt.Errorf("source Jira access is required for the ScriptRunner filter inventory path")
+	}
+
+	filters, scanSummary, findings, err := loadFiltersViaTeamFilterScriptRunner(client, progress)
+	if err != nil {
+		return nil, "", nil, findings, err
+	}
+
+	rows := buildFilterTeamClauseRows(filters, teams)
+	findings = append(findings,
+		newFinding(SeverityInfo, "source_filters_loaded_scriptrunner", scanSummary),
+		newFinding(SeverityInfo, "team_clause_matches_found", fmt.Sprintf("Found %d Team = {id|name} clause matches across %d filters", len(rows), countDistinctFilterIDs(rows))),
+	)
+
+	exportPath, artifact, exportFindings, err := finalizeResolvedFilterInventory(cfg, rows, "No Team = {id|name} clauses matching known source teams were found in the ScriptRunner filter inventory")
+	findings = append(findings, exportFindings...)
+	return rows, exportPath, artifact, findings, err
+}
+
+func scanFiltersWithSourceCSV(cfg Config, teams []TeamDTO) ([]FilterTeamClauseRow, string, *Artifact, []Finding, error) {
+	if strings.TrimSpace(cfg.FilterSourceCSV) == "" {
+		return nil, "", nil, nil, fmt.Errorf("source filter inventory CSV is required; provide --filter-source-csv or save it in the profile")
+	}
+
+	filters, err := loadFiltersFromSourceCSV(cfg.FilterSourceCSV)
+	if err != nil {
+		return nil, "", nil, nil, fmt.Errorf("loading source filter inventory CSV %s: %w", cfg.FilterSourceCSV, err)
+	}
+
+	rows := buildFilterTeamClauseRows(filters, teams)
+	findings := []Finding{
+		newFinding(SeverityInfo, "source_filters_loaded_csv", fmt.Sprintf("Loaded %d filters from source filter inventory CSV %s", len(filters), cfg.FilterSourceCSV)),
+		newFinding(SeverityInfo, "team_clause_matches_found", fmt.Sprintf("Found %d Team = {id|name} clause matches across %d filters", len(rows), countDistinctFilterIDs(rows))),
+	}
+
+	exportPath, artifact, exportFindings, err := finalizeResolvedFilterInventory(cfg, rows, "No Team = {id|name} clauses matching known source teams were found in the source filter inventory CSV")
+	findings = append(findings, exportFindings...)
+	return rows, exportPath, artifact, findings, err
+}
+
+func loadFiltersFromSourceCSV(path string) ([]JiraFilter, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, fmt.Errorf("CSV is empty; expected headers like Filter ID, Filter Name, Owner, JQL")
+	}
+
+	header := mapCSVHeaderIndexes(records[0])
+	jqlIndex := findCSVHeaderIndex(header, "jql", "query", "reqcontent")
+	if jqlIndex == -1 {
+		return nil, fmt.Errorf("CSV must include a JQL column; example query: %s", filterInventoryCSVExampleQuery())
+	}
+	idIndex := findCSVHeaderIndex(header, "filter id", "id")
+	nameIndex := findCSVHeaderIndex(header, "filter name", "name", "filtername")
+	ownerIndex := findCSVHeaderIndex(header, "owner", "author", "authorname")
+
+	filters := make([]JiraFilter, 0, len(records)-1)
+	for _, record := range records[1:] {
+		jql := csvRecordValue(record, jqlIndex)
+		if strings.TrimSpace(jql) == "" {
+			continue
+		}
+		filter := JiraFilter{
+			ID:   csvRecordValue(record, idIndex),
+			Name: csvRecordValue(record, nameIndex),
+			JQL:  jql,
+		}
+		if owner := csvRecordValue(record, ownerIndex); owner != "" {
+			filter.Owner = &JiraFilterUser{DisplayName: owner, Name: owner, Key: owner}
+		}
+		filters = append(filters, filter)
+	}
+
+	return filters, nil
+}
+
+func loadFiltersViaTeamFilterScriptRunner(client *jiraClient, progress func(current, total int)) ([]JiraFilter, string, []Finding, error) {
+	teamFieldID, fieldLabel, err := resolveTeamsCustomFieldNumericID(client)
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	var (
+		lastID           int64
+		totalScanned     int
+		totalParseErrors int
+		filters          []JiraFilter
+	)
+
+	for {
+		query := make(url.Values)
+		query.Set("enabled", "true")
+		query.Set("lastId", strconv.FormatInt(lastID, 10))
+		query.Set("limit", strconv.Itoa(teamFilterScriptRunnerPageSize))
+		query.Set("teamFieldId", teamFieldID)
+
+		body, err := client.doCoreJSON(http.MethodGet, teamFilterScriptRunnerEndpointPath, query, nil)
+		if err != nil {
+			endpointURL, buildErr := buildURL(client.instanceBaseURL, teamFilterScriptRunnerEndpointPath, query)
+			if buildErr != nil {
+				return nil, "", nil, err
+			}
+			return nil, "", nil, fmt.Errorf("calling ScriptRunner endpoint %s: %w", endpointURL, err)
+		}
+
+		var response teamFilterScriptRunnerResponse
+		if err := json.Unmarshal(body, &response); err != nil {
+			return nil, "", nil, fmt.Errorf("parsing ScriptRunner endpoint response: %w", err)
+		}
+
+		for _, result := range response.Results {
+			owner := strings.TrimSpace(result.Owner)
+			filter := JiraFilter{
+				ID:   strconv.FormatInt(result.ID, 10),
+				Name: result.Name,
+				JQL:  result.JQL,
+			}
+			if owner != "" {
+				filter.Owner = &JiraFilterUser{DisplayName: owner, Name: owner, Key: owner}
+			}
+			filters = append(filters, filter)
+		}
+
+		totalScanned += response.Meta.Scanned
+		totalParseErrors += response.Meta.ParseErrorCount
+		if progress != nil {
+			total := totalScanned
+			if response.Meta.Scanned >= teamFilterScriptRunnerPageSize {
+				total = totalScanned + 1
+			}
+			progress(totalScanned, total)
+		}
+
+		if response.Meta.Scanned == 0 || response.Meta.NextLastID <= lastID || response.Meta.Scanned < teamFilterScriptRunnerPageSize {
+			break
+		}
+		lastID = response.Meta.NextLastID
+	}
+
+	findings := []Finding{}
+	if totalParseErrors > 0 {
+		findings = append(findings, newFinding(SeverityWarning, "scriptrunner_filter_parse_errors", fmt.Sprintf("ScriptRunner filter inventory skipped %d filters because their JQL could not be parsed", totalParseErrors)))
+	}
+
+	summary := fmt.Sprintf("ScriptRunner endpoint scanned %d filters and returned %d candidate filters using Teams field %s (%s)", totalScanned, len(filters), fieldLabel, teamFieldID)
+	return filters, summary, findings, nil
+}
+
+func finalizeResolvedFilterInventory(cfg Config, rows []FilterTeamClauseRow, emptyMessage string) (string, *Artifact, []Finding, error) {
+	if len(rows) == 0 {
+		return "", nil, []Finding{newFinding(SeverityWarning, "no_team_filter_matches", emptyMessage)}, nil
+	}
+
+	exportPath, err := writeFilterTeamClauseExport(cfg, rows)
+	if err != nil {
+		return "", nil, nil, err
+	}
+
+	return exportPath, &Artifact{
+		Key:   "source_filters_with_team_clauses",
+		Label: "Filters with Team clauses",
+		Path:  exportPath,
+		Count: len(rows),
+	}, nil, nil
+}
+
+func loadAllFilters(client *jiraClient, progress func(current, total int)) ([]JiraFilter, []Finding, error) {
 	var all []JiraFilter
 	for startAt := 0; ; startAt += filterAPIMaxPageSize {
 		page, err := client.SearchFilters(startAt, filterAPIMaxPageSize)
 		if err != nil {
-			return nil, err
+			var apiErr *jiraAPIError
+			if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
+				filters, fallbackErr := client.ListFavouriteFilters()
+				if fallbackErr != nil {
+					return nil, nil, fallbackErr
+				}
+				if progress != nil {
+					progress(len(filters), len(filters))
+				}
+				findings := []Finding{
+					newFinding(SeverityWarning, "filter_search_endpoint_unsupported", "This Jira instance does not support /rest/api/2/filter/search; scanned favourite filters only"),
+				}
+				return filters, findings, nil
+			}
+			return nil, nil, err
 		}
 		if len(page.Values) == 0 {
 			break
@@ -109,7 +341,7 @@ func loadAllFilters(client *jiraClient, progress func(current, total int)) ([]Ji
 			break
 		}
 	}
-	return all, nil
+	return all, nil, nil
 }
 
 func buildFilterTeamClauseRows(filters []JiraFilter, teams []TeamDTO) []FilterTeamClauseRow {
@@ -250,6 +482,30 @@ func countDistinctFilterIDs(rows []FilterTeamClauseRow) int {
 		seen[row.FilterID] = struct{}{}
 	}
 	return len(seen)
+}
+
+func mapCSVHeaderIndexes(header []string) map[string]int {
+	indexes := make(map[string]int, len(header))
+	for i, value := range header {
+		indexes[strings.ToLower(strings.TrimSpace(value))] = i
+	}
+	return indexes
+}
+
+func findCSVHeaderIndex(header map[string]int, candidates ...string) int {
+	for _, candidate := range candidates {
+		if index, ok := header[strings.ToLower(strings.TrimSpace(candidate))]; ok {
+			return index
+		}
+	}
+	return -1
+}
+
+func csvRecordValue(record []string, index int) string {
+	if index < 0 || index >= len(record) {
+		return ""
+	}
+	return strings.TrimSpace(record[index])
 }
 
 func finalizeFilterScan(cfg Config, filters []JiraFilter, rows []FilterTeamClauseRow) (string, *Artifact, []Finding, []Action, error) {

@@ -6,58 +6,79 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
 
 const (
-	envSourceBaseURL   = "TEAMS_MIGRATOR_SOURCE_BASE_URL"
-	envSourceUsername  = "TEAMS_MIGRATOR_SOURCE_USERNAME"
-	envSourcePassword  = "TEAMS_MIGRATOR_SOURCE_PASSWORD"
-	envTargetBaseURL   = "TEAMS_MIGRATOR_TARGET_BASE_URL"
-	envTargetUsername  = "TEAMS_MIGRATOR_TARGET_USERNAME"
-	envTargetPassword  = "TEAMS_MIGRATOR_TARGET_PASSWORD"
-	envIdentityMapping = "TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE"
-	envTeamsFile       = "TEAMS_MIGRATOR_TEAMS_FILE"
-	envPersonsFile     = "TEAMS_MIGRATOR_PERSONS_FILE"
-	envResourcesFile   = "TEAMS_MIGRATOR_RESOURCES_FILE"
-	envIssuesCSV       = "TEAMS_MIGRATOR_ISSUES_CSV"
-	envOutputDir       = "TEAMS_MIGRATOR_OUTPUT_DIR"
-	envReportFormat    = "TEAMS_MIGRATOR_REPORT_FORMAT"
-	envTeamScope       = "TEAMS_MIGRATOR_TEAM_SCOPE"
-	envScanFilters     = "TEAMS_MIGRATOR_SCAN_FILTERS"
-	envStrict          = "TEAMS_MIGRATOR_STRICT"
-	envDryRun          = "TEAMS_MIGRATOR_DRY_RUN"
-	envReportInput     = "TEAMS_MIGRATOR_REPORT_INPUT"
+	envSourceBaseURL     = "TEAMS_MIGRATOR_SOURCE_BASE_URL"
+	envSourceUsername    = "TEAMS_MIGRATOR_SOURCE_USERNAME"
+	envSourcePassword    = "TEAMS_MIGRATOR_SOURCE_PASSWORD"
+	envTargetBaseURL     = "TEAMS_MIGRATOR_TARGET_BASE_URL"
+	envTargetUsername    = "TEAMS_MIGRATOR_TARGET_USERNAME"
+	envTargetPassword    = "TEAMS_MIGRATOR_TARGET_PASSWORD"
+	envIdentityMapping   = "TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE"
+	envTeamsFile         = "TEAMS_MIGRATOR_TEAMS_FILE"
+	envPersonsFile       = "TEAMS_MIGRATOR_PERSONS_FILE"
+	envResourcesFile     = "TEAMS_MIGRATOR_RESOURCES_FILE"
+	envIssuesCSV         = "TEAMS_MIGRATOR_ISSUES_CSV"
+	envFilterSourceCSV   = "TEAMS_MIGRATOR_FILTER_SOURCE_CSV"
+	envOutputDir         = "TEAMS_MIGRATOR_OUTPUT_DIR"
+	envReportFormat      = "TEAMS_MIGRATOR_REPORT_FORMAT"
+	envTeamScope         = "TEAMS_MIGRATOR_TEAM_SCOPE"
+	envIssueProjectScope = "TEAMS_MIGRATOR_ISSUE_PROJECT_SCOPE"
+	envScanFilters       = "TEAMS_MIGRATOR_SCAN_FILTERS"
+	envStrict            = "TEAMS_MIGRATOR_STRICT"
+	envDryRun            = "TEAMS_MIGRATOR_DRY_RUN"
+	envReportInput       = "TEAMS_MIGRATOR_REPORT_INPUT"
+	envPhase             = "TEAMS_MIGRATOR_PHASE"
+)
+
+const (
+	filterDataSourceScriptRunner = "scriptrunner"
+	filterDataSourceDatabaseCSV  = "db-csv"
 )
 
 type Config struct {
-	Command             string
-	SourceBaseURL       string
-	SourceUsername      string
-	SourcePassword      string
-	TargetBaseURL       string
-	TargetUsername      string
-	TargetPassword      string
-	IdentityMappingFile string
-	TeamsFile           string
-	PersonsFile         string
-	ResourcesFile       string
-	IssuesCSV           string
-	OutputDir           string
-	ReportInput         string
-	ReportFormat        ReportFormat
-	TeamScope           string
-	ScanFilters         bool
-	ScanFiltersExplicit bool
-	Strict              bool
-	DryRun              bool
-	Apply               bool
-	NoInput             bool
-	ConfigPath          string
-	Profile             string
-	Redacted            bool
-	OutputTimestamp     string
+	Command                     string
+	SourceBaseURL               string
+	SourceUsername              string
+	SourcePassword              string
+	TargetBaseURL               string
+	TargetUsername              string
+	TargetPassword              string
+	IdentityMappingFile         string
+	IdentityMappingSet          bool
+	TeamsFile                   string
+	PersonsFile                 string
+	ResourcesFile               string
+	IssuesCSV                   string
+	FilterSourceCSV             string
+	OutputDir                   string
+	ReportInput                 string
+	ReportFormat                ReportFormat
+	TeamScope                   string
+	IssueProjectScope           string
+	ScanFilters                 bool
+	ScanFiltersExplicit         bool
+	FilterTeamIDsInScope        bool
+	FilterTeamIDsInScopeSet     bool
+	ParentLinkInScope           bool
+	ParentLinkInScopeSet        bool
+	FilterDataSource            string
+	FilterScriptRunnerInstalled bool
+	FilterScriptRunnerEndpoint  string
+	Strict                      bool
+	DryRun                      bool
+	Apply                       bool
+	NoInput                     bool
+	ConfigPath                  string
+	Profile                     string
+	Redacted                    bool
+	OutputTimestamp             string
+	Phase                       string
+	PhaseExplicit               bool
 }
 
 func parseConfig(args []string) (Config, error) {
@@ -81,12 +102,15 @@ func parseConfig(args []string) (Config, error) {
 	fs.StringVar(&cfg.PersonsFile, "persons-file", envValue(envPersonsFile), "Path to source persons JSON export")
 	fs.StringVar(&cfg.ResourcesFile, "resources-file", envValue(envResourcesFile), "Path to source resources JSON export")
 	fs.StringVar(&cfg.IssuesCSV, "issues-csv", envValue(envIssuesCSV), "Path to issues CSV")
+	fs.StringVar(&cfg.FilterSourceCSV, "filter-source-csv", envValue(envFilterSourceCSV), "Path to source filter inventory CSV")
 	fs.StringVar(&cfg.OutputDir, "output-dir", envValue(envOutputDir), "Directory for generated reports")
 	fs.StringVar(&cfg.ReportInput, "input", envValue(envReportInput), "Input JSON report for the report subcommand")
 	fs.StringVar(&cfg.ConfigPath, "config", defaultConfigPath(), "Path to config.yaml profile store")
 	fs.StringVar(&cfg.Profile, "profile", envValue(envProfile), "Saved profile name from config.yaml")
+	fs.StringVar(&cfg.Phase, "phase", envValue(envPhase), "Migration phase for migrate: pre-migrate, migrate, or post-migrate")
 	fs.BoolVar(&cfg.Redacted, "redacted", true, "Redact secrets in config show output")
 	fs.StringVar(&cfg.TeamScope, "team-scope", envValue(envTeamScope), "Team migration scope: all, shared-only, or non-shared-only")
+	fs.StringVar(&cfg.IssueProjectScope, "issue-project-scope", envValue(envIssueProjectScope), "Issue correction project scope: all or a comma-separated list of Jira project keys")
 	cfg.ScanFilters = boolEnv(envScanFilters, false)
 	fs.BoolVar(&cfg.ScanFilters, "scan-filters", cfg.ScanFilters, "Scan Jira filters for Team = {id|name} clauses during the run")
 	cfg.ScanFiltersExplicit = envIsSet(envScanFilters) || boolFlagProvided(remaining, "--scan-filters")
@@ -100,6 +124,7 @@ func parseConfig(args []string) (Config, error) {
 	fs.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "Preview mutating operations without sending writes")
 	fs.BoolVar(&cfg.Apply, "apply", false, "Execute mutating operations; overrides dry-run for migrate")
 	fs.BoolVar(&cfg.NoInput, "no-input", false, "Disable interactive prompts and require flags or environment variables")
+	cfg.PhaseExplicit = envIsSet(envPhase) || stringFlagProvided(remaining, "--phase")
 
 	if err := fs.Parse(remaining); err != nil {
 		return Config{}, err
@@ -119,6 +144,14 @@ func parseConfig(args []string) (Config, error) {
 	}
 	if cfg.Apply {
 		cfg.DryRun = false
+	}
+	if normalized := normalizeMigrationPhase(cfg.Phase); normalized != "" {
+		cfg.Phase = normalized
+	} else if cfg.Command == "migrate" {
+		cfg.Phase = defaultMigrationPhase(cfg.Command)
+	}
+	if strings.TrimSpace(cfg.IdentityMappingFile) != "" {
+		cfg.IdentityMappingSet = true
 	}
 
 	if cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" {
@@ -144,10 +177,23 @@ func parseConfig(args []string) (Config, error) {
 	} else {
 		cfg.TeamScope = strings.ToLower(strings.TrimSpace(cfg.TeamScope))
 	}
+	if strings.TrimSpace(cfg.IssueProjectScope) == "" {
+		cfg.IssueProjectScope = "all"
+	}
+	if normalized := normalizeFilterDataSource(cfg.FilterDataSource); normalized != "" {
+		cfg.FilterDataSource = normalized
+	} else {
+		cfg.FilterDataSource = strings.ToLower(strings.TrimSpace(cfg.FilterDataSource))
+	}
 
-	if cfg.Command != "config init" && cfg.Command != "config show" && cfg.Command != "config path" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" && !cfg.NoInput {
-		if err := completeConfigInteractively(&cfg); err != nil {
-			return Config{}, err
+	if cfg.Command != "init" && cfg.Command != "config show" && cfg.Command != "config path" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" && !cfg.NoInput {
+		if cfg.Command == "migrate" && isInteractiveTerminal() {
+			// The migrate command runs a dedicated multi-phase session in Run so
+			// credentials and prior answers can stay in memory across phases.
+		} else {
+			if err := completeConfigInteractively(&cfg); err != nil {
+				return Config{}, err
+			}
 		}
 	}
 
@@ -162,12 +208,21 @@ func parseCommand(args []string) (string, []string, error) {
 	if len(args) == 0 {
 		return "", nil, errUsage
 	}
+	if args[0] == "validate" {
+		return "", nil, errors.New("validate command has been removed; use plan")
+	}
+	if args[0] == "init" {
+		return "init", args[1:], nil
+	}
 	if args[0] == "config" {
 		if len(args) < 2 {
 			return "", nil, errUsage
 		}
 		if args[1] != "init" && args[1] != "show" && args[1] != "path" {
 			return "", nil, fmt.Errorf("unknown config subcommand %q", args[1])
+		}
+		if args[1] == "init" {
+			return "init", args[2:], nil
 		}
 		return "config " + args[1], args[2:], nil
 	}
@@ -182,7 +237,7 @@ func (c Config) validate() error {
 	}
 
 	switch c.Command {
-	case "validate", "plan", "migrate", "scan-filters", "report", "config init", "config show", "config path", "version", "self-update", "uninstall":
+	case "init", "plan", "migrate", "scan-filters", "report", "config show", "config path", "version", "self-update", "uninstall":
 	default:
 		return fmt.Errorf("unknown command %q", c.Command)
 	}
@@ -192,9 +247,23 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("unsupported team scope %q; use all, shared-only, or non-shared-only", c.TeamScope)
 	}
+	if _, err := normalizeIssueProjectScope(c.IssueProjectScope); err != nil {
+		return err
+	}
+
+	switch c.FilterDataSource {
+	case "", filterDataSourceScriptRunner, filterDataSourceDatabaseCSV:
+	default:
+		return fmt.Errorf("unsupported filter data source %q; use %s or %s", c.FilterDataSource, filterDataSourceScriptRunner, filterDataSourceDatabaseCSV)
+	}
 
 	if c.Command == "report" && c.ReportInput == "" {
 		return errors.New("report command requires --input or TEAMS_MIGRATOR_REPORT_INPUT")
+	}
+	if c.Command == "migrate" {
+		if normalizeMigrationPhase(c.Phase) == "" {
+			return fmt.Errorf("unsupported migration phase %q; use pre-migrate, migrate, or post-migrate", c.Phase)
+		}
 	}
 
 	return nil
@@ -222,6 +291,7 @@ func (c Config) requireCoreInputs() []Finding {
 	if c.ScanFilters && c.SourceBaseURL == "" {
 		findings = append(findings, newFinding(SeverityError, "missing_source_base_url_for_filter_scan", "Filter scan requires a source Jira base URL"))
 	}
+	findings = append(findings, validateMigrationPhaseInputs(c)...)
 
 	for _, path := range []struct {
 		label string
@@ -245,8 +315,79 @@ func (c Config) requireCoreInputs() []Finding {
 	if c.IdentityMappingFile != "" {
 		findings = append(findings, validateIdentityMappingFile(c.IdentityMappingFile)...)
 	}
+	if normalizeFilterDataSource(c.FilterDataSource) == filterDataSourceDatabaseCSV && strings.TrimSpace(c.FilterSourceCSV) != "" {
+		if _, err := os.Stat(c.FilterSourceCSV); err != nil {
+			findings = append(findings, newFinding(SeverityError, "missing_file", fmt.Sprintf("filter source CSV file not found: %s", c.FilterSourceCSV)))
+		}
+	}
 
 	return findings
+}
+
+func validateMigrationPhaseInputs(c Config) []Finding {
+	if c.Command != "migrate" {
+		return nil
+	}
+
+	switch normalizeMigrationPhase(c.Phase) {
+	case phasePreMigrate:
+		if !c.DryRun {
+			return []Finding{newFinding(SeverityError, "pre_migrate_apply_unsupported", "Pre-migrate is a read-only phase; rerun without --apply")}
+		}
+		if c.ParentLinkInScope && strings.TrimSpace(c.SourceBaseURL) == "" {
+			return []Finding{newFinding(SeverityError, "pre_migrate_parent_link_missing_source", "Parent Link corrections are in scope, but no source Jira base URL is available for the pre-migrate export. Configure source Jira API access first.")}
+		}
+		if c.FilterTeamIDsInScope {
+			switch normalizeFilterDataSource(c.FilterDataSource) {
+			case "":
+				return []Finding{newFinding(SeverityError, "pre_migrate_filter_method_missing", "Filter team-ID updates are in scope, but no filter inventory method is configured. Re-run init and choose ScriptRunner or DB CSV.")}
+			case filterDataSourceDatabaseCSV:
+				if strings.TrimSpace(c.FilterSourceCSV) == "" {
+					return []Finding{newFinding(SeverityError, "pre_migrate_filter_csv_missing", "Filter team-ID updates are in scope and the configured method is DB CSV, but no --filter-source-csv path was provided or saved in the profile.")}
+				}
+			case filterDataSourceScriptRunner:
+				if !c.FilterScriptRunnerInstalled {
+					return []Finding{newFinding(SeverityError, "pre_migrate_filter_endpoint_not_installed", "Filter team-ID updates are in scope, but the ScriptRunner endpoint is not marked installed. Install it first or switch the method to DB CSV.")}
+				}
+				if strings.TrimSpace(c.SourceBaseURL) == "" {
+					return []Finding{newFinding(SeverityError, "pre_migrate_filter_endpoint_missing_source", "Filter team-ID updates are in scope and the configured method is ScriptRunner, but no source Jira base URL is available.")}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func normalizeIssueProjectScope(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.EqualFold(trimmed, "all") {
+		return nil, nil
+	}
+	parts := strings.Split(trimmed, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		projectKey := strings.ToUpper(strings.TrimSpace(part))
+		if projectKey == "" {
+			continue
+		}
+		for _, r := range projectKey {
+			if (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+				return nil, fmt.Errorf("unsupported issue project scope %q; use all or a comma-separated list of Jira project keys", raw)
+			}
+		}
+		if _, ok := seen[projectKey]; ok {
+			continue
+		}
+		seen[projectKey] = struct{}{}
+		out = append(out, projectKey)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (c Config) requireFilterScanInputs() []Finding {
@@ -320,6 +461,29 @@ func envIsSet(key string) bool {
 func boolFlagProvided(args []string, name string) bool {
 	for _, arg := range args {
 		if arg == name || strings.HasPrefix(arg, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeFilterDataSource(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case filterDataSourceScriptRunner:
+		return filterDataSourceScriptRunner
+	case filterDataSourceDatabaseCSV, "db", "csv", "database", "database-csv":
+		return filterDataSourceDatabaseCSV
+	default:
+		return ""
+	}
+}
+
+func stringFlagProvided(args []string, name string) bool {
+	for i, arg := range args {
+		if arg == name {
+			return i < len(args)-1
+		}
+		if strings.HasPrefix(arg, name+"=") {
 			return true
 		}
 	}

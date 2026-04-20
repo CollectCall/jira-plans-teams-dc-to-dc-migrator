@@ -53,16 +53,26 @@ func runConfigShow(cfg Config) error {
 
 func profileToMap(profile SavedProfile) map[string]any {
 	out := map[string]any{
-		"source_base_url":       profile.SourceBaseURL,
-		"target_base_url":       profile.TargetBaseURL,
-		"identity_mapping_file": profile.IdentityMappingFile,
-		"teams_file":            profile.TeamsFile,
-		"persons_file":          profile.PersonsFile,
-		"resources_file":        profile.ResourcesFile,
-		"issues_csv":            profile.IssuesCSV,
-		"output_dir":            profile.OutputDir,
-		"report_format":         profile.ReportFormat,
-		"team_scope":            profile.TeamScope,
+		"source_base_url":               profile.SourceBaseURL,
+		"target_base_url":               profile.TargetBaseURL,
+		"identity_mapping_file":         profile.IdentityMappingFile,
+		"identity_mapping_set":          profile.IdentityMappingSet,
+		"teams_file":                    profile.TeamsFile,
+		"persons_file":                  profile.PersonsFile,
+		"resources_file":                profile.ResourcesFile,
+		"issues_csv":                    profile.IssuesCSV,
+		"filter_source_csv":             profile.FilterSourceCSV,
+		"output_dir":                    profile.OutputDir,
+		"report_format":                 profile.ReportFormat,
+		"team_scope":                    profile.TeamScope,
+		"issue_project_scope":           profile.IssueProjectScope,
+		"filter_team_ids_in_scope":      profile.FilterTeamIDsInScope,
+		"filter_team_ids_in_scope_set":  profile.FilterTeamIDsInScopeSet,
+		"parent_link_in_scope":          profile.ParentLinkInScope,
+		"parent_link_in_scope_set":      profile.ParentLinkInScopeSet,
+		"filter_data_source":            profile.FilterDataSource,
+		"filter_scriptrunner_installed": profile.FilterScriptRunnerInstalled,
+		"filter_scriptrunner_endpoint":  profile.FilterScriptRunnerEndpoint,
 	}
 	return out
 }

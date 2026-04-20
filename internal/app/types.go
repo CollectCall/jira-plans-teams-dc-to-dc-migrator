@@ -25,6 +25,7 @@ const (
 
 type Report struct {
 	Command      string         `json:"command"`
+	Phase        string         `json:"phase,omitempty"`
 	DryRun       bool           `json:"dryRun"`
 	Strict       bool           `json:"strict"`
 	GeneratedAt  time.Time      `json:"generatedAt"`
@@ -44,13 +45,18 @@ type Endpoint struct {
 }
 
 type InputFiles struct {
-	IdentityMapping string `json:"identityMapping,omitempty"`
-	Teams           string `json:"teams,omitempty"`
-	Persons         string `json:"persons,omitempty"`
-	Resources       string `json:"resources,omitempty"`
-	IssuesCSV       string `json:"issuesCsv,omitempty"`
-	TeamScope       string `json:"teamScope,omitempty"`
-	ScanFilters     bool   `json:"scanFilters,omitempty"`
+	IdentityMapping      string `json:"identityMapping,omitempty"`
+	Teams                string `json:"teams,omitempty"`
+	Persons              string `json:"persons,omitempty"`
+	Resources            string `json:"resources,omitempty"`
+	IssuesCSV            string `json:"issuesCsv,omitempty"`
+	FilterSourceCSV      string `json:"filterSourceCsv,omitempty"`
+	TeamScope            string `json:"teamScope,omitempty"`
+	IssueProjectScope    string `json:"issueProjectScope,omitempty"`
+	ScanFilters          bool   `json:"scanFilters,omitempty"`
+	FilterTeamIDsInScope bool   `json:"filterTeamIDsInScope,omitempty"`
+	ParentLinkInScope    bool   `json:"parentLinkInScope,omitempty"`
+	FilterDataSource     string `json:"filterDataSource,omitempty"`
 }
 
 type Action struct {

@@ -10,7 +10,7 @@ It is not intended for Jira Cloud.
 ### Linux
 ```bash
 curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.sh | sh
-teams-migrator config init
+teams-migrator init
 ```
 
 Manual install from a downloaded release artifact:
@@ -25,19 +25,19 @@ tar -xzf teams-migrator_<version>_linux_amd64.tar.gz
 mkdir -p ~/.local/bin
 install teams-migrator ~/.local/bin/teams-migrator
 export PATH="$HOME/.local/bin:$PATH"
-teams-migrator config init
+teams-migrator init
 ```
 
 ### macOS
 ```bash
 curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.sh | sh
-teams-migrator config init
+teams-migrator init
 ```
 
 ### Windows
 ```powershell
 irm https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.ps1 | iex
-teams-migrator.exe config init
+teams-migrator.exe init
 ```
 
 The release installer downloads the latest published GitHub Release for your OS and CPU and prefers a writable directory already on `PATH`.
@@ -45,12 +45,11 @@ If none is available, it falls back to a user-local bin directory and tells you 
 
 ## Commands
 
-- `validate`: validate configuration and local inputs
+- `init`: interactive wizard to create or update a saved profile
 - `plan`: generate a migration plan report
 - `migrate`: run a dry-run by default, or switch to apply mode with `--apply`
-- `scan-filters`: scan Jira filters for `Team = {id|name}` JQL clauses that match known source teams
+- `scan-filters`: do a best-effort REST scan for `Team = {id|name}` JQL clauses that match known source teams
 - `report`: re-render a previously generated JSON report as JSON or CSV
-- `config init`: interactive wizard to create or update a saved profile
 - `config path`: print the config file path in use
 - `config show`: print saved profile config, redacted by default
 - `uninstall`: remove the installed binary and local config directory
@@ -58,15 +57,25 @@ If none is available, it falls back to a user-local bin directory and tells you 
 ## First Run
 
 ```bash
-teams-migrator config init
-teams-migrator validate
+teams-migrator init
 teams-migrator plan --profile default
 teams-migrator scan-filters --profile default
 teams-migrator migrate --profile default --apply
 ```
 
 The CLI is interactive by default when run in a terminal. If required inputs or secrets are missing, it prompts for them.
-During interactive `validate`, `plan`, and `migrate` runs it also asks whether filters should be scanned; the default is `no`.
+During interactive `plan` and `migrate` runs it also asks whether filters should be scanned; the default is `no`.
+During `init` it also asks whether team-ID-based filter rewrites are in scope, and if they are, whether the source filter inventory is from ScriptRunner or a DB-derived CSV.
+
+### Filter prerequisites (team-ID rewrite scope)
+
+To use ScriptRunner for filters, install and publish the endpoint scripts in your Jira ScriptRunner app:
+- `scripts/sourceFindTeamFiltersDB.groovy` → `/rest/scriptrunner/latest/custom/findTeamFiltersDB`
+- `scripts/targetFindTeamFiltersDB.groovy` → `/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB`
+
+The ScriptRunner endpoints require Jira admin permission and basic auth; `init` verifies them during setup when source/base URL is available.
+
+If ScriptRunner is not available, use `--filter-source-csv` with a CSV containing `Filter ID`, `Filter Name`, `Owner`, and `JQL` (DB-derived).
 
 To update an installed binary to the latest published release:
 
@@ -89,7 +98,7 @@ Config defaults:
 
 ### File-based input
 ```bash
-teams-migrator validate \
+teams-migrator plan \
   --identity-mapping ./identity-mapping.csv \
   --teams-file ./teams.json \
   --persons-file ./persons.json \
@@ -111,6 +120,18 @@ teams-migrator migrate \
   --apply
 ```
 
+### Init and migrate arguments for filter flow (compact)
+
+`init`
+- interactive by default; answer the filter scope prompts to save how filters are resolved
+- no dedicated filter flags are required during `init` other than normal profile/Jira inputs
+
+`migrate`
+- `--filter-source-csv <path>`: required when using DB-derived CSV (instead of ScriptRunner)
+- `--scan-filters`: best-effort visible-filter scan during migrate/reporting flow
+- `--phase pre-migrate|migrate|post-migrate`: run only the selected phase
+- `--apply`: perform updates (otherwise dry-run)
+
 ### Filter scan POC
 ```bash
 teams-migrator scan-filters \
@@ -120,7 +141,7 @@ teams-migrator scan-filters \
   --teams-file ./teams.json
 ```
 
-The filter scan currently performs a proof-of-concept inventory pass against Jira's filter REST API and exports filters whose JQL contains a `Team = ...` clause matching a known source team ID or team name.
-It only scans filters visible to the authenticated user, so production coverage depends on the permissions of the account used for the scan.
+The filter scan performs a best-effort REST inventory pass for visible `Team = ...` clauses and is not authoritative.
+For full coverage, use the ScriptRunner scripts above or a DB-derived CSV (`--filter-source-csv`) that includes `Filter ID`, `Filter Name`, `Owner`, and `JQL`.
 
 The CLI uses basic auth for Jira API access. When credentials are not supplied through flags or environment variables, it prompts for them at runtime and does not store them in the profile.

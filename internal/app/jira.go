@@ -14,9 +14,13 @@ import (
 )
 
 const (
-	defaultPageSize     = 500
-	teamsAPIMaxPageSize = 100
-	jpoAPIMaxPageSize   = 100
+	defaultPageSize                          = 500
+	teamsAPIMaxPageSize                      = 100
+	jpoAPIMaxPageSize                        = 100
+	teamFilterScriptRunnerEndpointPath       = "/rest/scriptrunner/latest/custom/findTeamFiltersDB"
+	teamFilterScriptRunnerScriptPath         = "scripts/sourceFindTeamFiltersDB.groovy"
+	targetTeamFilterScriptRunnerEndpointPath = "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB"
+	targetTeamFilterScriptRunnerScriptPath   = "scripts/targetFindTargetTeamFiltersDB.groovy"
 )
 
 type jiraClient struct {
@@ -25,6 +29,23 @@ type jiraClient struct {
 	username        string
 	password        string
 	httpClient      *http.Client
+}
+
+type jiraAPIError struct {
+	Method     string
+	Endpoint   string
+	StatusCode int
+	Message    string
+}
+
+func (e *jiraAPIError) Error() string {
+	switch e.StatusCode {
+	case http.StatusUnauthorized:
+		return fmt.Sprintf("%s %s returned 401: Jira authentication failed; check the username/password you entered for this instance", e.Method, e.Endpoint)
+	case http.StatusForbidden:
+		return fmt.Sprintf("%s %s returned 403: Jira authenticated the request but denied access; check the permissions for this instance", e.Method, e.Endpoint)
+	}
+	return fmt.Sprintf("%s %s returned %d: %s", e.Method, e.Endpoint, e.StatusCode, e.Message)
 }
 
 func newJiraClient(baseURL, username, password string) (*jiraClient, error) {
@@ -178,6 +199,31 @@ func (c *jiraClient) SearchIssues(jql string, fields []string, progress func(cur
 	return all, nil
 }
 
+func (c *jiraClient) GetIssue(key string, fields []string) (*JiraIssue, error) {
+	query := url.Values{}
+	if len(fields) > 0 {
+		query.Set("fields", strings.Join(fields, ","))
+	}
+
+	body, err := c.doCoreJSON(http.MethodGet, "/rest/api/2/issue/"+strings.TrimSpace(key), query, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var issue JiraIssue
+	if err := json.Unmarshal(body, &issue); err != nil {
+		return nil, err
+	}
+	return &issue, nil
+}
+
+func (c *jiraClient) UpdateIssueFields(key string, fields map[string]any) error {
+	_, err := c.doCoreJSON(http.MethodPut, "/rest/api/2/issue/"+strings.TrimSpace(key), nil, map[string]any{
+		"fields": fields,
+	})
+	return err
+}
+
 func (c *jiraClient) SearchFilters(startAt, maxResults int) (JiraFilterSearchResults, error) {
 	query := url.Values{}
 	query.Set("expand", "jql,owner")
@@ -196,6 +242,60 @@ func (c *jiraClient) SearchFilters(startAt, maxResults int) (JiraFilterSearchRes
 	return results, nil
 }
 
+func (c *jiraClient) ListFavouriteFilters() ([]JiraFilter, error) {
+	query := url.Values{}
+	query.Set("expand", "jql,owner")
+
+	body, err := c.doCoreJSON(http.MethodGet, "/rest/api/2/filter/favourite", query, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var filters []JiraFilter
+	if err := json.Unmarshal(body, &filters); err != nil {
+		return nil, err
+	}
+	return filters, nil
+}
+
+func (c *jiraClient) GetFilter(id string) (*JiraFilter, error) {
+	query := url.Values{}
+	query.Set("expand", "jql,owner")
+
+	body, err := c.doCoreJSON(http.MethodGet, "/rest/api/2/filter/"+strings.TrimSpace(id), query, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var filter JiraFilter
+	if err := json.Unmarshal(body, &filter); err != nil {
+		return nil, err
+	}
+	return &filter, nil
+}
+
+type JiraFilterUpdatePayload struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	JQL         string `json:"jql"`
+}
+
+func (c *jiraClient) UpdateFilter(id string, payload JiraFilterUpdatePayload) (*JiraFilter, error) {
+	body, err := c.doCoreJSON(http.MethodPut, "/rest/api/2/filter/"+strings.TrimSpace(id), nil, payload)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 {
+		return nil, nil
+	}
+
+	var filter JiraFilter
+	if err := json.Unmarshal(body, &filter); err != nil {
+		return nil, err
+	}
+	return &filter, nil
+}
+
 func (c *jiraClient) SearchCoreUsers(queryText string) ([]CoreJiraUser, error) {
 	query := url.Values{}
 	query.Set("username", strings.TrimSpace(queryText))
@@ -212,6 +312,74 @@ func (c *jiraClient) SearchCoreUsers(queryText string) ([]CoreJiraUser, error) {
 		return nil, err
 	}
 	return users, nil
+}
+
+func verifyTeamFilterScriptRunnerEndpoint(baseURL, username, password string) (string, string, error) {
+	client, err := newJiraClient(baseURL, username, password)
+	if err != nil {
+		return "", "", err
+	}
+	return verifyTeamFilterScriptRunnerEndpointWithClient(client)
+}
+
+func verifyTeamFilterScriptRunnerEndpointWithClient(client *jiraClient) (string, string, error) {
+	teamFieldID, fieldLabel, err := resolveTeamsCustomFieldNumericID(client)
+	if err != nil {
+		return "", "", err
+	}
+
+	query := url.Values{}
+	query.Set("enabled", "true")
+	query.Set("lastId", "0")
+	query.Set("limit", "500")
+	query.Set("teamFieldId", teamFieldID)
+
+	body, err := client.doCoreJSON(http.MethodGet, teamFilterScriptRunnerEndpointPath, query, nil)
+	if err != nil {
+		return "", "", err
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", "", fmt.Errorf("script runner endpoint returned a non-JSON response")
+	}
+
+	endpointURL, err := buildURL(client.instanceBaseURL, teamFilterScriptRunnerEndpointPath, query)
+	if err != nil {
+		return "", "", err
+	}
+	return endpointURL, fmt.Sprintf("%s (%s)", fieldLabel, teamFieldID), nil
+}
+
+func resolveTeamsCustomFieldNumericID(client *jiraClient) (string, string, error) {
+	fields, err := client.ListFields()
+	if err != nil {
+		return "", "", fmt.Errorf("could not load Jira fields to resolve the Teams field ID: %w", err)
+	}
+
+	selection, findings := selectTeamsField(fields)
+	if selection == nil {
+		message := "could not resolve the Jira Teams field ID"
+		if len(findings) > 0 && strings.TrimSpace(findings[0].Message) != "" {
+			message = findings[0].Message
+		}
+		return "", "", fmt.Errorf("%s", message)
+	}
+
+	teamFieldID, err := extractCustomFieldNumericID(selection.Field.ID)
+	if err != nil {
+		return "", "", err
+	}
+	return teamFieldID, selection.Field.Name, nil
+}
+
+func extractCustomFieldNumericID(fieldID string) (string, error) {
+	const prefix = "customfield_"
+	trimmed := strings.TrimSpace(fieldID)
+	if !strings.HasPrefix(trimmed, prefix) || len(trimmed) == len(prefix) {
+		return "", fmt.Errorf("resolved Teams field %q is not a Jira customfield_* identifier", fieldID)
+	}
+	return strings.TrimPrefix(trimmed, prefix), nil
 }
 
 func listPaged[T any](c *jiraClient, endpoint string, progress func(current, total int)) ([]T, error) {
@@ -310,7 +478,12 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s %s returned %d: %s", method, endpoint, resp.StatusCode, summarizeJiraError(data))
+		return nil, &jiraAPIError{
+			Method:     method,
+			Endpoint:   endpoint,
+			StatusCode: resp.StatusCode,
+			Message:    summarizeJiraError(data),
+		}
 	}
 	return data, nil
 }
@@ -440,4 +613,16 @@ func decodeID(data []byte) (int64, error) {
 	}
 
 	return 0, fmt.Errorf("unable to decode ID from response")
+}
+
+func buildURL(base, endpoint string, query url.Values) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("invalid base URL: %w", err)
+	}
+	u.Path = path.Join(u.Path, endpoint)
+	if query != nil {
+		u.RawQuery = query.Encode()
+	}
+	return u.String(), nil
 }

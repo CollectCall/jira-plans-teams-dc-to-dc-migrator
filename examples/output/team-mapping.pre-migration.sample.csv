@@ -1,0 +1,4 @@
+sourceTeamId,sourceTitle,sourceShareable,targetTeamId,targetTitle,decision,reason,conflictReason
+101,Platform Team,true,501,Platform Team,reused,normalized title matched existing shared team,
+102,Ops Project Team,false,,,skipped,non-shared team requires destination plan context and manual creation first,
+103,Delivery Team,true,503,Delivery Team,create,missing exact match in destination,

@@ -1,0 +1,4 @@
+sourceResourceId,sourceTeamId,sourceTeamName,sourcePersonId,sourceEmail,targetEmail,targetTeamId,targetTeamName,targetUserId,weeklyHours,status,reason
+9001,101,Platform Team,2001,alex.old@example.com,alex.new@example.com,501,Platform Team,alex.new,40,planned,
+9002,101,Platform Team,2002,jamie.old@example.com,jamie.new@example.com,501,Platform Team,jamie.new,32,planned,
+9003,102,Ops Project Team,2003,pat.old@example.com,pat.new@example.com,,,,"",skipped,target team not available yet

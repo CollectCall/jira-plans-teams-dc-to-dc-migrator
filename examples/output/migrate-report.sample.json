@@ -1,0 +1,107 @@
+{
+  "command": "migrate",
+  "phase": "pre-migrate",
+  "dryRun": true,
+  "strict": false,
+  "generatedAt": "2026-04-20T18:30:00Z",
+  "source": {
+    "baseUrl": "https://source-jira.example.com",
+    "mode": "api"
+  },
+  "target": {
+    "baseUrl": "https://target-jira.example.com",
+    "mode": "api"
+  },
+  "inputs": {
+    "identityMapping": "./examples/identity-mapping.sample.csv",
+    "issuesCSV": "./examples/issues.sample.csv",
+    "filterSourceCSV": "./examples/filter-source.sample.csv",
+    "teamScope": "all",
+    "issueProjectScope": "MIG,CORE",
+    "filterTeamIDsInScope": true,
+    "parentLinkInScope": true,
+    "filterDataSource": "db-csv"
+  },
+  "actions": [
+    {
+      "kind": "team",
+      "sourceId": "101",
+      "targetId": "501",
+      "status": "reused",
+      "details": "Platform Team -> Platform Team (merge)"
+    },
+    {
+      "kind": "team",
+      "sourceId": "102",
+      "status": "skipped",
+      "details": "Ops Project Team -> Ops Project Team (skipped: non-shared team requires destination plan context first)"
+    },
+    {
+      "kind": "resource",
+      "sourceId": "9001",
+      "targetId": "7001",
+      "status": "planned",
+      "details": "team=501 user=alex.new weeklyHours=40.00"
+    },
+    {
+      "kind": "team_mapping",
+      "status": "generated",
+      "details": "out/team-mapping.pre-migration.csv"
+    },
+    {
+      "kind": "team_membership_mapping",
+      "status": "generated",
+      "details": "out/team-membership-mapping.pre-migration.csv"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "info",
+      "code": "target_users_resolved",
+      "message": "Resolved 2 target Jira users for resource-linked identities"
+    },
+    {
+      "severity": "warning",
+      "code": "non_shared_team_manual_prerequisite",
+      "message": "Skipped 1 non-shared teams that must already exist in destination plans before migration: Ops Project Team"
+    },
+    {
+      "severity": "info",
+      "code": "team_mapping_generated",
+      "message": "Generated team mapping comparison: out/team-mapping.pre-migration.csv"
+    },
+    {
+      "severity": "info",
+      "code": "dry_run_default",
+      "message": "Dry-run is active; no remote writes were sent"
+    }
+  ],
+  "stats": {
+    "infos": 3,
+    "warnings": 1,
+    "errors": 0,
+    "actions": 5
+  },
+  "exitBehavior": {
+    "successCode": 0,
+    "fatalErrorCode": 1,
+    "strictIssueCode": 2,
+    "strictIssuesDetected": false
+  },
+  "metadata": {
+    "artifacts": [
+      {
+        "key": "team_mapping",
+        "label": "Team mapping comparison",
+        "path": "out/team-mapping.pre-migration.csv",
+        "count": 3
+      },
+      {
+        "key": "team_membership_mapping",
+        "label": "Team membership mapping comparison",
+        "path": "out/team-membership-mapping.pre-migration.csv",
+        "count": 4
+      }
+    ]
+  }
+}

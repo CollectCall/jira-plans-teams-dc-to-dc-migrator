@@ -113,6 +113,23 @@ teams-migrator migrate --profile default --phase post-migrate --apply
 
 For a fuller walkthrough, see [docs/quickstart.md](docs/quickstart.md).
 
+## What the output looks like
+
+The CLI produces reviewable JSON and CSV artifacts under `out/`. A typical run gives you:
+
+- a machine-readable report JSON with actions, findings, stats, and artifact metadata
+- CSV comparisons for teams and memberships before writes happen
+- post-migrate comparison CSVs for Parent Link and filter Team ID corrections when those scopes are enabled
+
+Sample redacted artifacts:
+
+- [examples/output/migrate-report.sample.json](examples/output/migrate-report.sample.json)
+- [examples/output/team-mapping.pre-migration.sample.csv](examples/output/team-mapping.pre-migration.sample.csv)
+- [examples/output/team-membership-mapping.pre-migration.sample.csv](examples/output/team-membership-mapping.pre-migration.sample.csv)
+- [examples/output/filter-jql-comparison.post-migration.sample.csv](examples/output/filter-jql-comparison.post-migration.sample.csv)
+
+See [docs/sample-output.md](docs/sample-output.md) for a brief guide to how to read them.
+
 ## Safety model
 
 - Dry-run is the default.
@@ -227,8 +244,11 @@ Useful options:
 
 - [docs/quickstart.md](docs/quickstart.md)
 - [docs/compatibility.md](docs/compatibility.md)
+- [docs/sample-output.md](docs/sample-output.md)
+- [docs/roadmap.md](docs/roadmap.md)
 - [docs/support.md](docs/support.md)
 - [docs/release-policy.md](docs/release-policy.md)
+- [CHANGELOG.md](CHANGELOG.md)
 - [DESIGN.md](DESIGN.md)
 - [SPECIFICATIONS.md](SPECIFICATIONS.md)
 

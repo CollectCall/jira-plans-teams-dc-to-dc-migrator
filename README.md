@@ -1,6 +1,6 @@
 # Teams Migrator
 
-This tool helps migrate teams used by Jira Advanced Roadmaps (formerly Portfolio, now called Plans in Cloud) between Jira Server/Data Center instances. It prepares source and destination exports to make manual recreation and mapping easier, migrates teams and memberships where possible, and can fix related Jira references such as Parent Links and Team IDs in saved filters. It does not support Jira Cloud.
+This tool helps migrate Jira Advanced Roadmaps teams and team memberships between Jira Server/Data Center instances. It collects source and target data, writes review files to support manual recreation and mapping, migrates teams and memberships where they can be matched and safely created, and can fix related Jira references such as Parent Link values and Team IDs in saved filters. It does not support Jira Cloud.
 
 ## Install
 
@@ -33,16 +33,16 @@ teams-migrator init
 
 ### Windows
 ```powershell
-irm https://raw.githubusercontent.com/CollectCall/jira-plans-dc-to-dc-migrator/master/scripts/install-release.ps1 | iex
+irm https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.ps1 | iex
 teams-migrator.exe init
 ```
 
 The release installer downloads the latest published GitHub Release for your OS and CPU and prefers a writable directory already on `PATH`.
 If none is available, it falls back to a user-local bin directory and tells you what to add to `PATH`.
 
-## Important limitation
+## Non-shared teams
 
-Non-shared teams must already exist in the destination plan. This tool does not create them.
+Non-shared teams must already exist in the destination plan. This tool does not create them and will skip them during migration.
 
 ## What `init` stores
 
@@ -70,7 +70,7 @@ Interactive `migrate` can walk through pre-migrate, migrate, and post-migrate in
 - `migrate`: creates the teams and memberships that the tool can safely create in the target Jira.
 - `post-migrate`: fixes Jira references after the target team IDs exist, such as Parent Link issue references and Team IDs inside saved filter JQL.
 
-## Filter prerequisite
+## Filter prerequisites
 
 If filter rewrites are in scope, the tool needs a source list of filters that contain team IDs.
 
@@ -78,13 +78,13 @@ To use ScriptRunner for that, install and publish these endpoint scripts in your
 - `scripts/sourceFindTeamFiltersDB.groovy` → `/rest/scriptrunner/latest/custom/findTeamFiltersDB`
 - `scripts/targetFindTeamFiltersDB.groovy` → `/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB`
 
-The ScriptRunner endpoints require Jira admin permission and basic auth; `init` verifies them during setup when source/base URL is available.
+The ScriptRunner endpoints require Jira admin permission and basic auth; `init` verifies them during setup when the source Jira base URL is available.
 
 If ScriptRunner is not available, use `--filter-source-csv` with a CSV containing `Filter ID`, `Filter Name`, `Owner`, and `JQL` (DB-derived).
 
 ## Migration details
 
-### Teams and membership migration
+### Teams and memberships migration
 
 This is the main migration flow. The tool:
 
@@ -155,5 +155,3 @@ To uninstall the binary:
 ```bash
 teams-migrator uninstall
 ```
-
-The CLI uses basic auth for Jira API access. When credentials are not supplied through flags or environment variables, it prompts for them at runtime and does not store them in the profile.

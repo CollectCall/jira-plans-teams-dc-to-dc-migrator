@@ -33,8 +33,11 @@ type SavedProfile struct {
 	OutputDir                   string
 	ReportFormat                string
 	TeamScope                   string
+	IssueProjectScope           string
 	FilterTeamIDsInScope        bool
 	FilterTeamIDsInScopeSet     bool
+	ParentLinkInScope           bool
+	ParentLinkInScopeSet        bool
 	FilterDataSource            string
 	FilterScriptRunnerInstalled bool
 	FilterScriptRunnerEndpoint  string
@@ -168,9 +171,16 @@ func applySavedProfile(cfg *Config, profile SavedProfile) {
 	if cfg.TeamScope == "" {
 		cfg.TeamScope = profile.TeamScope
 	}
+	if cfg.IssueProjectScope == "" {
+		cfg.IssueProjectScope = profile.IssueProjectScope
+	}
 	if !cfg.FilterTeamIDsInScopeSet {
 		cfg.FilterTeamIDsInScope = profile.FilterTeamIDsInScope
 		cfg.FilterTeamIDsInScopeSet = profile.FilterTeamIDsInScopeSet
+	}
+	if !cfg.ParentLinkInScopeSet {
+		cfg.ParentLinkInScope = profile.ParentLinkInScope
+		cfg.ParentLinkInScopeSet = profile.ParentLinkInScopeSet
 	}
 	if cfg.FilterDataSource == "" {
 		cfg.FilterDataSource = profile.FilterDataSource
@@ -211,8 +221,11 @@ func savedProfileFromConfig(cfg Config, includeSecrets bool) SavedProfile {
 		OutputDir:                   cfg.OutputDir,
 		ReportFormat:                string(cfg.ReportFormat),
 		TeamScope:                   cfg.TeamScope,
+		IssueProjectScope:           cfg.IssueProjectScope,
 		FilterTeamIDsInScope:        cfg.FilterTeamIDsInScope,
 		FilterTeamIDsInScopeSet:     cfg.FilterTeamIDsInScopeSet,
+		ParentLinkInScope:           cfg.ParentLinkInScope,
+		ParentLinkInScopeSet:        cfg.ParentLinkInScopeSet,
 		FilterDataSource:            cfg.FilterDataSource,
 		FilterScriptRunnerInstalled: cfg.FilterScriptRunnerInstalled,
 		FilterScriptRunnerEndpoint:  cfg.FilterScriptRunnerEndpoint,
@@ -240,8 +253,11 @@ func profileEntries(profile SavedProfile) []profileEntry {
 		{key: "output_dir", value: profile.OutputDir},
 		{key: "report_format", value: profile.ReportFormat},
 		{key: "team_scope", value: profile.TeamScope},
+		{key: "issue_project_scope", value: profile.IssueProjectScope},
 		{key: "filter_team_ids_in_scope", value: formatBool(profile.FilterTeamIDsInScope)},
 		{key: "filter_team_ids_in_scope_set", value: formatBool(profile.FilterTeamIDsInScopeSet)},
+		{key: "parent_link_in_scope", value: formatBool(profile.ParentLinkInScope)},
+		{key: "parent_link_in_scope_set", value: formatBool(profile.ParentLinkInScopeSet)},
 		{key: "filter_data_source", value: profile.FilterDataSource},
 		{key: "filter_scriptrunner_installed", value: formatBool(profile.FilterScriptRunnerInstalled)},
 		{key: "filter_scriptrunner_endpoint", value: profile.FilterScriptRunnerEndpoint},
@@ -275,10 +291,16 @@ func assignProfileField(profile *SavedProfile, key, value string) {
 		profile.ReportFormat = value
 	case "team_scope":
 		profile.TeamScope = value
+	case "issue_project_scope":
+		profile.IssueProjectScope = value
 	case "filter_team_ids_in_scope":
 		profile.FilterTeamIDsInScope = parseBoolScalar(value)
 	case "filter_team_ids_in_scope_set":
 		profile.FilterTeamIDsInScopeSet = parseBoolScalar(value)
+	case "parent_link_in_scope":
+		profile.ParentLinkInScope = parseBoolScalar(value)
+	case "parent_link_in_scope_set":
+		profile.ParentLinkInScopeSet = parseBoolScalar(value)
 	case "filter_data_source":
 		profile.FilterDataSource = normalizeFilterDataSource(value)
 	case "filter_scriptrunner_installed":

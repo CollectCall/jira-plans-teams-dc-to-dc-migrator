@@ -22,9 +22,9 @@ func TestPrintSummaryShowsPhaseSectionsForTypedMetadata(t *testing.T) {
 		"Pre-migrate Preview",
 		"Migrate Preview",
 		"Post-migrate Preview",
-		"Issue update: ABC-123 [Red Team] -> 142",
-		`Filter update: Red Filter [10000] Team = "Red Team" -> Team = 142`,
-		"Parent link updates: TODO",
+		"Issue update: ABC-123 [Red Team] Team = 42 -> Team = 142",
+		"Parent link update: ABC-123 Parent Link = 10001 -> Parent Link = 20001",
+		`Filter update: Numeric Team Filter [10001] Team = 42 -> Team = 142`,
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("summary did not contain %q:\n%s", want, rendered)
@@ -56,8 +56,9 @@ func TestPrintSummaryShowsPhaseSectionsForDecodedJSONMetadata(t *testing.T) {
 		"Pre-migrate Preview",
 		"Migrate Preview",
 		"Post-migrate Preview",
-		"Issue update: ABC-123 [Red Team] -> 142",
-		`Filter update: Red Filter [10000] Team = "Red Team" -> Team = 142`,
+		"Issue update: ABC-123 [Red Team] Team = 42 -> Team = 142",
+		"Parent link update: ABC-123 Parent Link = 10001 -> Parent Link = 20001",
+		`Filter update: Numeric Team Filter [10001] Team = 42 -> Team = 142`,
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("summary did not contain %q after JSON decode:\n%s", want, rendered)
@@ -93,8 +94,14 @@ func samplePhaseReport() Report {
 				"issues": []IssueTeamRow{
 					{IssueKey: "ABC-123", Summary: "Move team field", SourceTeamIDs: "42", SourceTeamNames: "Red Team"},
 				},
+				"parentLinkComparisons": []PostMigrationParentLinkComparisonRow{
+					{IssueKey: "ABC-123", SourceParentIssueID: "10001", TargetParentIssueID: "20001", Status: "ready"},
+				},
+				"filterComparisons": []PostMigrationFilterComparisonRow{
+					{SourceFilterID: "10001", SourceFilterName: "Numeric Team Filter", SourceClause: "Team = 42", SourceTeamID: "42", TargetTeamID: "142", Status: "ready"},
+				},
 				"filters": []FilterTeamClauseRow{
-					{FilterID: "10000", FilterName: "Red Filter", SourceTeamID: "42", SourceTeamName: "Red Team", Clause: `Team = "Red Team"`},
+					{FilterID: "10000", FilterName: "Red Filter", MatchType: "team_name", SourceTeamID: "42", SourceTeamName: "Red Team", Clause: `Team = "Red Team"`},
 				},
 			},
 		},

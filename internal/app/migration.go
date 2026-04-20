@@ -4,7 +4,10 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,29 +15,41 @@ import (
 )
 
 type migrationState struct {
-	IdentityMappings      IdentityMapping
-	SourcePrograms        []ProgramDTO
-	TargetPrograms        []ProgramDTO
-	ProgramMappings       []ProgramMapping
-	SourcePlans           []PlanDTO
-	TargetPlans           []PlanDTO
-	PlanMappings          []PlanMapping
-	SourceTeams           []TeamDTO
-	SourcePersons         []PersonDTO
-	SourceResources       []ResourceDTO
-	TargetTeams           []TeamDTO
-	TargetPersons         []PersonDTO
-	TargetResources       []ResourceDTO
-	TeamMappings          []TeamMapping
-	ResourcePlans         []ResourcePlan
-	TeamsField            *TeamsFieldSelection
-	IssueTeamRows         []IssueTeamRow
-	FilterTeamClauseRows  []FilterTeamClauseRow
-	IssueExportPath       string
-	IssueImportExportPath string
-	MembershipExportPath  string
-	FilterScanExportPath  string
-	Artifacts             []Artifact
+	IdentityMappings          IdentityMapping
+	SourcePrograms            []ProgramDTO
+	TargetPrograms            []ProgramDTO
+	ProgramMappings           []ProgramMapping
+	SourcePlans               []PlanDTO
+	TargetPlans               []PlanDTO
+	PlanMappings              []PlanMapping
+	SourceTeams               []TeamDTO
+	SourcePersons             []PersonDTO
+	SourceResources           []ResourceDTO
+	TargetTeams               []TeamDTO
+	TargetPersons             []PersonDTO
+	TargetResources           []ResourceDTO
+	TeamMappings              []TeamMapping
+	ResourcePlans             []ResourcePlan
+	TeamsField                *TeamsFieldSelection
+	IssueTeamRows             []IssueTeamRow
+	ParentLinkRows            []ParentLinkRow
+	FilterTeamClauseRows      []FilterTeamClauseRow
+	TargetIssueSnapshots      []TargetIssueSnapshotRow
+	IssueComparisons          []PostMigrationIssueComparisonRow
+	IssueUpdateResults        []PostMigrationIssueResultRow
+	TargetParentLinkSnapshots []TargetParentLinkSnapshotRow
+	ParentLinkComparisons     []PostMigrationParentLinkComparisonRow
+	ParentLinkUpdateResults   []PostMigrationParentLinkResultRow
+	TargetFilters             []JiraFilter
+	TargetFilterSnapshots     []TargetFilterSnapshotRow
+	FilterTargetMatches       []PostMigrationFilterMatchRow
+	FilterComparisons         []PostMigrationFilterComparisonRow
+	FilterUpdateResults       []PostMigrationFilterResultRow
+	IssueExportPath           string
+	IssueImportExportPath     string
+	MembershipExportPath      string
+	FilterScanExportPath      string
+	Artifacts                 []Artifact
 }
 
 func executeMigration(cfg Config, apply bool) (migrationState, []Finding, []Action) {
@@ -47,10 +62,13 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 		return state, findings, nil
 	}
 
-	actions := planTeamActions(state)
-	resourceActions, resourceFindings := planResourceActions(state)
-	actions = append(actions, resourceActions...)
-	findings = append(findings, resourceFindings...)
+	actions := []Action{}
+	if !runsPostMigratePhase(cfg.Command, cfg.Phase) {
+		actions = planTeamActions(state)
+		resourceActions, resourceFindings := planResourceActions(state)
+		actions = append(actions, resourceActions...)
+		findings = append(findings, resourceFindings...)
+	}
 	for _, artifact := range state.Artifacts {
 		actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
 	}
@@ -74,10 +92,967 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 		return state, findings, actions
 	}
 
+	if runsPostMigratePhase(cfg.Command, cfg.Phase) {
+		findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state)...)
+		execActions, execFindings := applyPostMigrationCorrections(cfg, targetClient, &state)
+		actions = append(actions, execActions...)
+		findings = append(findings, execFindings...)
+		return state, findings, actions
+	}
+
 	execActions, execFindings := applyMigration(targetClient, &state)
 	actions = append(actions, execActions...)
 	findings = append(findings, execFindings...)
+	if runsMigratePhase(cfg.Command, cfg.Phase) {
+		exportPath, err := writeTeamIDMappingExport(cfg, state.TeamMappings)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "migration_team_id_mapping_export_failed", err.Error()))
+		} else if exportPath != "" {
+			artifact := Artifact{
+				Key:   "migration_team_id_mapping",
+				Label: "Migration team ID mapping",
+				Path:  exportPath,
+				Count: len(state.TeamMappings),
+			}
+			state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+			actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+			findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
+		}
+		prepFindings, prepActions := preparePostMigrationCorrectionArtifacts(cfg, &state)
+		findings = append(findings, prepFindings...)
+		actions = append(actions, prepActions...)
+	}
 	return state, findings, actions
+}
+
+func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) ([]Finding, []Action) {
+	var findings []Finding
+	var actions []Action
+
+	if len(state.IssueTeamRows) == 0 {
+		if issuePath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-teams.pre-migration.csv"); ok {
+			rows, err := loadIssueTeamRowsFromExport(issuePath)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "migration_issue_mapping_input_load_failed", fmt.Sprintf("Could not load issue/team export %s: %v", issuePath, err)))
+			} else {
+				state.IssueTeamRows = rows
+				state.IssueExportPath = issuePath
+			}
+		}
+	}
+	if len(state.IssueTeamRows) > 0 {
+		exportPath, err := writePostMigrationIssueTeamExport(cfg, state.IssueTeamRows, state.TeamMappings)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "migration_issue_mapping_export_failed", err.Error()))
+		} else if exportPath != "" {
+			artifact := Artifact{
+				Key:   "post_migrate_issue_team_mapping",
+				Label: "Post-migration issue/team mapping",
+				Path:  exportPath,
+				Count: len(state.IssueTeamRows),
+			}
+			state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+			actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+			findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
+		}
+	}
+
+	if cfg.ParentLinkInScope {
+		if len(state.ParentLinkRows) == 0 {
+			if parentPath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv"); ok {
+				rows, err := loadParentLinkRowsFromExport(parentPath)
+				if err != nil {
+					findings = append(findings, newFinding(SeverityWarning, "migration_parent_link_input_load_failed", fmt.Sprintf("Could not load parent link export %s: %v", parentPath, err)))
+				} else {
+					state.ParentLinkRows = rows
+				}
+			} else {
+				findings = append(findings, newFinding(SeverityWarning, "migration_parent_link_input_missing", "Could not prepare post-migration parent-link mapping because no pre-migrate parent-link export was found. Run pre-migrate first."))
+			}
+		}
+		if len(state.ParentLinkRows) > 0 {
+			exportPath, err := writePostMigrationParentLinkExport(cfg, state.ParentLinkRows)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "migration_parent_link_export_failed", err.Error()))
+			} else if exportPath != "" {
+				artifact := Artifact{
+					Key:   "post_migrate_parent_link_mapping",
+					Label: "Post-migration parent-link mapping",
+					Path:  exportPath,
+					Count: len(state.ParentLinkRows),
+				}
+				state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+				actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+				findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
+			}
+		}
+	}
+
+	if cfg.FilterTeamIDsInScope {
+		if len(state.FilterTeamClauseRows) == 0 {
+			if filterPath, ok := latestOutputFamilyPath(cfg.OutputDir, "filters-with-team-clauses.pre-migration.csv"); ok {
+				rows, err := loadFilterTeamClauseRowsFromExport(filterPath)
+				if err != nil {
+					findings = append(findings, newFinding(SeverityWarning, "migration_filter_mapping_input_load_failed", fmt.Sprintf("Could not load filter export %s: %v", filterPath, err)))
+				} else {
+					state.FilterTeamClauseRows = rows
+					state.FilterScanExportPath = filterPath
+				}
+			} else {
+				findings = append(findings, newFinding(SeverityWarning, "migration_filter_mapping_input_missing", "Could not prepare post-migration filter mapping because no pre-migrate filter export was found. Run pre-migrate first."))
+			}
+		}
+		if len(state.FilterTeamClauseRows) > 0 {
+			exportPath, rowCount, err := writePostMigrationFilterTeamExport(cfg, state.FilterTeamClauseRows, state.TeamMappings)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "migration_filter_mapping_export_failed", err.Error()))
+			} else if exportPath != "" {
+				artifact := Artifact{
+					Key:   "post_migrate_filter_team_mapping",
+					Label: "Post-migration filter/team mapping",
+					Path:  exportPath,
+					Count: rowCount,
+				}
+				state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+				actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+				findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
+			}
+		}
+	}
+
+	return findings, actions
+}
+
+func preparePostMigrationTargetArtifacts(cfg Config, state *migrationState) []Finding {
+	findings := preparePostMigrationTargetIssueArtifacts(cfg, state)
+	findings = append(findings, preparePostMigrationTargetParentLinkArtifacts(cfg, state)...)
+	return append(findings, preparePostMigrationTargetFilterArtifacts(cfg, state)...)
+}
+
+func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState) []Finding {
+	if len(state.IssueTeamRows) == 0 {
+		return nil
+	}
+
+	state.TargetIssueSnapshots = nil
+	state.IssueComparisons = nil
+
+	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+	if err != nil {
+		return []Finding{newFinding(SeverityWarning, "post_migrate_target_issue_client", fmt.Sprintf("Could not create target Jira client for issue lookup: %v", err))}
+	}
+
+	fields, err := targetClient.ListFields()
+	if err != nil {
+		return []Finding{newFinding(SeverityWarning, "post_migrate_target_issue_field_lookup_failed", fmt.Sprintf("Could not load target Jira fields for issue comparison: %v", err))}
+	}
+
+	selection, selectionFindings := selectTeamsField(fields)
+	findings := append([]Finding{}, selectionFindings...)
+	if selection == nil {
+		return append(findings, newFinding(SeverityWarning, "post_migrate_target_issue_field_missing", "Could not resolve the target Jira Teams field for issue comparison"))
+	}
+
+	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_issue_lookup_started", fmt.Sprintf("Resolving target issues for %d issue/team rows using Teams field %s (%s)", len(state.IssueTeamRows), selection.Field.Name, selection.Field.ID)))
+
+	fetchedIssues := map[string]JiraIssue{}
+	for _, row := range state.IssueTeamRows {
+		issueKey := strings.TrimSpace(row.IssueKey)
+		if issueKey == "" {
+			continue
+		}
+		if _, ok := fetchedIssues[issueKey]; ok {
+			continue
+		}
+		issue, err := targetClient.GetIssue(issueKey, []string{"summary", "project", "projectType", selection.Field.ID})
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_issue_fetch_failed", fmt.Sprintf("Could not fetch target issue %s: %v", issueKey, err)))
+			continue
+		}
+		fetchedIssues[issueKey] = *issue
+	}
+
+	snapshotRows := buildTargetIssueSnapshotRows(selection.Field.ID, fetchedIssues)
+	state.TargetIssueSnapshots = snapshotRows
+	if path, err := writeTargetIssueSnapshotExport(cfg, snapshotRows); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_issue_snapshot_failed", err.Error()))
+	} else if path != "" {
+		state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+			Key:   "post_migrate_target_issue_snapshot",
+			Label: "Target issue snapshot",
+			Path:  path,
+			Count: len(snapshotRows),
+		})
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_issue_snapshot_generated", fmt.Sprintf("Generated target issue snapshot: %s", path)))
+	}
+
+	comparisonRows := buildPostMigrationIssueComparisonRows(state.IssueTeamRows, selection.Field.ID, fetchedIssues, state.TeamMappings)
+	state.IssueComparisons = comparisonRows
+	if path, err := writePostMigrationIssueComparisonExport(cfg, comparisonRows); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_comparison_failed", err.Error()))
+	} else if path != "" {
+		state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+			Key:   "post_migrate_issue_comparison",
+			Label: "Post-migration issue comparison",
+			Path:  path,
+			Count: len(comparisonRows),
+		})
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_issue_comparison_generated", fmt.Sprintf("Generated issue comparison export: %s", path)))
+	}
+
+	return findings
+}
+
+func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationState) []Finding {
+	if !cfg.ParentLinkInScope || len(state.ParentLinkRows) == 0 {
+		return nil
+	}
+
+	state.TargetParentLinkSnapshots = nil
+	state.ParentLinkComparisons = nil
+
+	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+	if err != nil {
+		return []Finding{newFinding(SeverityWarning, "post_migrate_target_parent_link_client", fmt.Sprintf("Could not create target Jira client for Parent Link lookup: %v", err))}
+	}
+
+	fields, err := targetClient.ListFields()
+	if err != nil {
+		return []Finding{newFinding(SeverityWarning, "post_migrate_target_parent_link_field_lookup_failed", fmt.Sprintf("Could not load target Jira fields for Parent Link comparison: %v", err))}
+	}
+
+	field, selectionFindings := selectParentLinkField(fields)
+	findings := append([]Finding{}, selectionFindings...)
+	if field == nil {
+		return append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_field_missing", "Could not resolve the target Jira Parent Link field for comparison"))
+	}
+
+	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_parent_link_lookup_started", fmt.Sprintf("Resolving target Parent Link state for %d source rows using field %s (%s)", len(state.ParentLinkRows), field.Name, field.ID)))
+
+	childIssues := map[string]JiraIssue{}
+	for _, row := range state.ParentLinkRows {
+		issueKey := strings.TrimSpace(row.IssueKey)
+		if issueKey == "" {
+			continue
+		}
+		if _, ok := childIssues[issueKey]; ok {
+			continue
+		}
+		issue, err := targetClient.GetIssue(issueKey, []string{"summary", "project", "projectType", field.ID})
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_child_fetch_failed", fmt.Sprintf("Could not fetch target child issue %s: %v", issueKey, err)))
+			continue
+		}
+		childIssues[issueKey] = *issue
+	}
+
+	targetParents := map[string]JiraIssue{}
+	for _, row := range state.ParentLinkRows {
+		parentKey := strings.TrimSpace(row.SourceParentIssueKey)
+		if parentKey == "" {
+			continue
+		}
+		if _, ok := targetParents[parentKey]; ok {
+			continue
+		}
+		issue, err := targetClient.GetIssue(parentKey, []string{"summary", "project"})
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_lookup_failed", fmt.Sprintf("Could not fetch target parent issue %s: %v", parentKey, err)))
+			continue
+		}
+		targetParents[parentKey] = *issue
+	}
+
+	currentParentCache := map[string]JiraIssue{}
+	snapshotRows := buildTargetParentLinkSnapshotRows(targetClient, field.ID, childIssues, currentParentCache)
+	state.TargetParentLinkSnapshots = snapshotRows
+	if path, err := writeTargetParentLinkSnapshotExport(cfg, snapshotRows); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_snapshot_failed", err.Error()))
+	} else if path != "" {
+		state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+			Key:   "post_migrate_target_parent_link_snapshot",
+			Label: "Target Parent Link snapshot",
+			Path:  path,
+			Count: len(snapshotRows),
+		})
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_parent_link_snapshot_generated", fmt.Sprintf("Generated target Parent Link snapshot: %s", path)))
+	}
+
+	comparisonRows, comparisonFindings := buildPostMigrationParentLinkComparisonRows(targetClient, state.ParentLinkRows, field.ID, childIssues, targetParents, currentParentCache)
+	findings = append(findings, comparisonFindings...)
+	state.ParentLinkComparisons = comparisonRows
+	if path, err := writePostMigrationParentLinkComparisonExport(cfg, comparisonRows); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_comparison_failed", err.Error()))
+	} else if path != "" {
+		state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+			Key:   "post_migrate_parent_link_comparison",
+			Label: "Post-migration parent-link comparison",
+			Path:  path,
+			Count: len(comparisonRows),
+		})
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_parent_link_comparison_generated", fmt.Sprintf("Generated parent-link comparison export: %s", path)))
+	}
+
+	return findings
+}
+
+func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState) []Finding {
+	if !cfg.FilterTeamIDsInScope || len(state.FilterTeamClauseRows) == 0 {
+		return nil
+	}
+
+	state.TargetFilters = nil
+	state.TargetFilterSnapshots = nil
+	state.FilterTargetMatches = nil
+	state.FilterComparisons = nil
+
+	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+	if err != nil {
+		return []Finding{newFinding(SeverityWarning, "post_migrate_target_filter_client", fmt.Sprintf("Could not create target Jira client for filter lookup: %v", err))}
+	}
+
+	teamFieldID, fieldLabel, err := resolveTeamsCustomFieldNumericID(targetClient)
+	if err != nil {
+		return []Finding{newFinding(SeverityWarning, "post_migrate_target_filter_field", fmt.Sprintf("Could not resolve target Teams field ID for filter lookup: %v", err))}
+	}
+
+	sourceFilters := uniqueSourceTeamIDFilters(state.FilterTeamClauseRows)
+	if len(sourceFilters) == 0 {
+		return []Finding{newFinding(SeverityInfo, "post_migrate_target_filter_lookup_skipped", "No source filter rows using team IDs were found for target filter lookup")}
+	}
+
+	findings := []Finding{
+		newFinding(SeverityInfo, "post_migrate_target_filter_lookup_started", fmt.Sprintf("Resolving target filters for %d source filters using Teams field %s", len(sourceFilters), fieldLabel)),
+	}
+
+	candidatesBySource := map[string][]JiraFilter{}
+	targetFilterIDs := map[string]struct{}{}
+	for _, sourceFilter := range sourceFilters {
+		candidates, candidateFindings, err := loadTargetFiltersForSourceFilter(targetClient, teamFieldID, sourceFilter)
+		findings = append(findings, candidateFindings...)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_lookup_failed", fmt.Sprintf("Could not resolve target filter candidates for %q: %v", sourceFilter.FilterName, err)))
+			continue
+		}
+		candidatesBySource[sourceFilter.FilterID] = candidates
+		for _, filter := range candidates {
+			targetFilterIDs[filter.ID] = struct{}{}
+		}
+	}
+
+	fetchedFilters := map[string]JiraFilter{}
+	filterIDs := make([]string, 0, len(targetFilterIDs))
+	for id := range targetFilterIDs {
+		filterIDs = append(filterIDs, id)
+	}
+	sort.Strings(filterIDs)
+	for _, id := range filterIDs {
+		filter, err := targetClient.GetFilter(id)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_fetch_failed", fmt.Sprintf("Could not fetch target filter %s: %v", id, err)))
+			continue
+		}
+		fetchedFilters[id] = *filter
+		state.TargetFilters = append(state.TargetFilters, *filter)
+	}
+
+	snapshotRows := buildTargetFilterSnapshotRows(fetchedFilters)
+	state.TargetFilterSnapshots = snapshotRows
+	if path, err := writeTargetFilterSnapshotExport(cfg, snapshotRows); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_snapshot_failed", err.Error()))
+	} else if path != "" {
+		state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+			Key:   "post_migrate_target_filter_snapshot",
+			Label: "Target filter snapshot",
+			Path:  path,
+			Count: len(snapshotRows),
+		})
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_filter_snapshot_generated", fmt.Sprintf("Generated target filter snapshot: %s", path)))
+	}
+
+	matchRows, comparisonRows := buildPostMigrationFilterMatchAndComparisonRows(state.FilterTeamClauseRows, candidatesBySource, fetchedFilters, state.TeamMappings)
+	state.FilterTargetMatches = matchRows
+	state.FilterComparisons = comparisonRows
+
+	if path, err := writePostMigrationFilterTargetMatchExport(cfg, matchRows); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_target_match_failed", err.Error()))
+	} else if path != "" {
+		state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+			Key:   "post_migrate_filter_target_match",
+			Label: "Post-migration filter target match",
+			Path:  path,
+			Count: len(matchRows),
+		})
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_target_match_generated", fmt.Sprintf("Generated filter target match export: %s", path)))
+	}
+
+	if path, err := writePostMigrationFilterComparisonExport(cfg, comparisonRows); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_comparison_failed", err.Error()))
+	} else if path != "" {
+		state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+			Key:   "post_migrate_filter_comparison",
+			Label: "Post-migration filter JQL comparison",
+			Path:  path,
+			Count: len(comparisonRows),
+		})
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_comparison_generated", fmt.Sprintf("Generated filter JQL comparison export: %s", path)))
+	}
+
+	return findings
+}
+
+func uniqueSourceTeamIDFilters(rows []FilterTeamClauseRow) []FilterTeamClauseRow {
+	byFilterID := map[string]FilterTeamClauseRow{}
+	for _, row := range rows {
+		if row.MatchType != "team_id" {
+			continue
+		}
+		if _, ok := byFilterID[row.FilterID]; ok {
+			continue
+		}
+		byFilterID[row.FilterID] = row
+	}
+
+	ids := make([]string, 0, len(byFilterID))
+	for id := range byFilterID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	out := make([]FilterTeamClauseRow, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, byFilterID[id])
+	}
+	return out
+}
+
+func loadTargetFiltersForSourceFilter(client *jiraClient, teamFieldID string, sourceFilter FilterTeamClauseRow) ([]JiraFilter, []Finding, error) {
+	var (
+		lastID           int64
+		totalScanned     int
+		totalParseErrors int
+		filters          []JiraFilter
+		parseErrors      []teamFilterParseError
+	)
+
+	for {
+		query := make(url.Values)
+		query.Set("enabled", "true")
+		query.Set("lastId", strconv.FormatInt(lastID, 10))
+		query.Set("limit", strconv.Itoa(teamFilterScriptRunnerPageSize))
+		query.Set("teamFieldId", teamFieldID)
+		query.Set("filterName", sourceFilter.FilterName)
+		if strings.TrimSpace(sourceFilter.Owner) != "" {
+			query.Set("owner", sourceFilter.Owner)
+		}
+
+		body, err := client.doCoreJSON(http.MethodGet, targetTeamFilterScriptRunnerEndpointPath, query, nil)
+		if err != nil {
+			endpointURL, buildErr := buildURL(client.instanceBaseURL, targetTeamFilterScriptRunnerEndpointPath, query)
+			if buildErr != nil {
+				return nil, nil, err
+			}
+			return nil, nil, fmt.Errorf("calling target ScriptRunner endpoint %s: %w", endpointURL, err)
+		}
+
+		var response teamFilterScriptRunnerResponse
+		if err := json.Unmarshal(body, &response); err != nil {
+			return nil, nil, fmt.Errorf("parsing target ScriptRunner endpoint response: %w", err)
+		}
+
+		for _, result := range response.Results {
+			owner := strings.TrimSpace(result.Owner)
+			filter := JiraFilter{
+				ID:   strconv.FormatInt(result.ID, 10),
+				Name: result.Name,
+				JQL:  result.JQL,
+			}
+			if owner != "" {
+				filter.Owner = &JiraFilterUser{DisplayName: owner, Name: owner, Key: owner}
+			}
+			if targetFilterMatchesSource(filter, sourceFilter) {
+				filters = append(filters, filter)
+			}
+		}
+
+		totalScanned += response.Meta.Scanned
+		totalParseErrors += response.Meta.ParseErrorCount
+		parseErrors = append(parseErrors, response.ParseErrors...)
+		if response.Meta.Scanned == 0 || response.Meta.NextLastID <= lastID || response.Meta.Scanned < teamFilterScriptRunnerPageSize {
+			break
+		}
+		lastID = response.Meta.NextLastID
+	}
+
+	deduped := deduplicateFiltersByID(filters)
+	findings := []Finding{}
+	if totalParseErrors > 0 {
+		parseErrorSamples := summarizeTeamFilterParseErrors(parseErrors, 3)
+		if parseErrorSamples != "" {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_parse_errors", fmt.Sprintf("Target filter lookup for %q skipped %d filters because their JQL could not be parsed: %s", sourceFilter.FilterName, totalParseErrors, parseErrorSamples)))
+		} else {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_parse_errors", fmt.Sprintf("Target filter lookup for %q skipped %d filters because their JQL could not be parsed", sourceFilter.FilterName, totalParseErrors)))
+		}
+	}
+	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_filter_lookup_summary", fmt.Sprintf("Target filter lookup scanned %d rows and found %d exact candidate filters for %q", totalScanned, len(deduped), sourceFilter.FilterName)))
+	return deduped, findings, nil
+}
+
+func summarizeTeamFilterParseErrors(parseErrors []teamFilterParseError, maxSamples int) string {
+	if len(parseErrors) == 0 {
+		return ""
+	}
+	if maxSamples <= 0 {
+		maxSamples = 1
+	}
+	limit := len(parseErrors)
+	if limit > maxSamples {
+		limit = maxSamples
+	}
+	samples := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		parseError := parseErrors[i]
+		name := strings.TrimSpace(parseError.Name)
+		if name != "" {
+			if parseError.ID > 0 {
+				samples = append(samples, fmt.Sprintf("%q (id=%d)", name, parseError.ID))
+			} else {
+				samples = append(samples, fmt.Sprintf("%q", name))
+			}
+			continue
+		}
+		if parseError.ID > 0 {
+			samples = append(samples, fmt.Sprintf("Filter ID %d", parseError.ID))
+		} else {
+			samples = append(samples, "unknown filter")
+		}
+	}
+	return strings.Join(samples, ", ")
+}
+
+func targetFilterMatchesSource(filter JiraFilter, sourceFilter FilterTeamClauseRow) bool {
+	if normalizeTitle(filter.Name) != normalizeTitle(sourceFilter.FilterName) {
+		return false
+	}
+	sourceOwner := normalizeTitle(sourceFilter.Owner)
+	if sourceOwner == "" {
+		return true
+	}
+	return normalizeTitle(filterOwnerLabel(filter.Owner)) == sourceOwner
+}
+
+func deduplicateFiltersByID(filters []JiraFilter) []JiraFilter {
+	byID := map[string]JiraFilter{}
+	for _, filter := range filters {
+		if strings.TrimSpace(filter.ID) == "" {
+			continue
+		}
+		byID[filter.ID] = filter
+	}
+
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	out := make([]JiraFilter, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, byID[id])
+	}
+	return out
+}
+
+func buildTargetFilterSnapshotRows(filters map[string]JiraFilter) []TargetFilterSnapshotRow {
+	ids := make([]string, 0, len(filters))
+	for id := range filters {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	rows := make([]TargetFilterSnapshotRow, 0, len(ids))
+	for _, id := range ids {
+		filter := filters[id]
+		rows = append(rows, TargetFilterSnapshotRow{
+			TargetFilterID:   filter.ID,
+			TargetFilterName: filter.Name,
+			TargetOwner:      filterOwnerLabel(filter.Owner),
+			Description:      filter.Description,
+			JQL:              filter.JQL,
+			ViewURL:          filter.ViewURL,
+			SearchURL:        filter.SearchURL,
+		})
+	}
+	return rows
+}
+
+func buildTargetIssueSnapshotRows(targetTeamsFieldID string, issues map[string]JiraIssue) []TargetIssueSnapshotRow {
+	keys := make([]string, 0, len(issues))
+	for key := range issues {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	rows := make([]TargetIssueSnapshotRow, 0, len(keys))
+	for _, key := range keys {
+		issue := issues[key]
+		projectKey, projectName, projectType := issueProjectDetails(issue.Fields)
+		summary := ""
+		if rawSummary, ok := issue.Fields["summary"].(string); ok {
+			summary = rawSummary
+		}
+		rows = append(rows, TargetIssueSnapshotRow{
+			IssueKey:             issue.Key,
+			ProjectKey:           projectKey,
+			ProjectName:          projectName,
+			ProjectType:          projectType,
+			Summary:              summary,
+			TargetTeamsFieldID:   targetTeamsFieldID,
+			CurrentTargetTeamIDs: strings.Join(extractTeamFieldIDs(issue.Fields[targetTeamsFieldID]), ","),
+		})
+	}
+	return rows
+}
+
+func buildTargetParentLinkSnapshotRows(client *jiraClient, targetParentLinkFieldID string, issues map[string]JiraIssue, currentParentCache map[string]JiraIssue) []TargetParentLinkSnapshotRow {
+	keys := make([]string, 0, len(issues))
+	for key := range issues {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	rows := make([]TargetParentLinkSnapshotRow, 0, len(keys))
+	for _, key := range keys {
+		issue := issues[key]
+		projectKey, projectName, projectType := issueProjectDetails(issue.Fields)
+		summary := ""
+		if rawSummary, ok := issue.Fields["summary"].(string); ok {
+			summary = rawSummary
+		}
+		currentParentID, currentParentKey, _ := resolveIssueReference(client, issue.Fields[targetParentLinkFieldID], currentParentCache)
+		rows = append(rows, TargetParentLinkSnapshotRow{
+			IssueKey:                issue.Key,
+			IssueID:                 issue.ID,
+			ProjectKey:              projectKey,
+			ProjectName:             projectName,
+			ProjectType:             projectType,
+			Summary:                 summary,
+			TargetParentLinkFieldID: targetParentLinkFieldID,
+			CurrentParentIssueID:    currentParentID,
+			CurrentParentIssueKey:   currentParentKey,
+		})
+	}
+	return rows
+}
+
+func buildPostMigrationIssueComparisonRows(sourceRows []IssueTeamRow, targetTeamsFieldID string, fetchedIssues map[string]JiraIssue, teamMappings []TeamMapping) []PostMigrationIssueComparisonRow {
+	rows := make([]PostMigrationIssueComparisonRow, 0, len(sourceRows))
+	targetTeamIDs := teamTargetIDsBySourceID(teamMappings)
+	for _, sourceRow := range sourceRows {
+		rows = append(rows, buildPostMigrationIssueComparisonRow(sourceRow, targetTeamsFieldID, fetchedIssues[sourceRow.IssueKey], targetTeamIDs))
+	}
+	return rows
+}
+
+func buildPostMigrationIssueComparisonRow(sourceRow IssueTeamRow, targetTeamsFieldID string, targetIssue JiraIssue, targetTeamIDs map[string]string) PostMigrationIssueComparisonRow {
+	row := PostMigrationIssueComparisonRow{
+		IssueKey:           sourceRow.IssueKey,
+		ProjectKey:         sourceRow.ProjectKey,
+		ProjectName:        sourceRow.ProjectName,
+		ProjectType:        sourceRow.ProjectType,
+		Summary:            sourceRow.Summary,
+		SourceTeamsFieldID: sourceRow.TeamsFieldID,
+		TargetTeamsFieldID: targetTeamsFieldID,
+		SourceTeamIDs:      sourceRow.SourceTeamIDs,
+		SourceTeamNames:    sourceRow.SourceTeamNames,
+		TargetTeamIDs:      strings.Join(mappedTargetTeamIDsForExport(sourceRow.SourceTeamIDs, targetTeamIDs), ","),
+	}
+
+	if strings.TrimSpace(targetIssue.Key) == "" {
+		row.Status = "not_found"
+		row.Reason = "no target issue with the same issue key was found"
+		return row
+	}
+
+	currentIDs := extractTeamFieldIDs(targetIssue.Fields[targetTeamsFieldID])
+	row.CurrentTargetTeamIDs = strings.Join(currentIDs, ",")
+
+	sourceIDs := splitDelimitedValues(sourceRow.SourceTeamIDs)
+	if len(sourceIDs) == 0 {
+		row.Status = "no_source_team_ids"
+		row.Reason = "no source team IDs were exported for this issue"
+		return row
+	}
+
+	changedSourceIDs := make([]string, 0, len(sourceIDs))
+	targetIDs := make([]string, 0, len(sourceIDs))
+	for _, sourceID := range sourceIDs {
+		targetID := strings.TrimSpace(targetTeamIDs[sourceID])
+		if targetID == "" {
+			row.Status = "unresolved_team_mapping"
+			row.Reason = "no destination team ID was resolved for one or more source team IDs on this issue"
+			return row
+		}
+		targetIDs = append(targetIDs, targetID)
+		if targetID != sourceID {
+			changedSourceIDs = append(changedSourceIDs, sourceID)
+		}
+	}
+
+	if len(changedSourceIDs) == 0 {
+		row.Status = "same_id"
+		row.Reason = "source and target team IDs are identical; no issue update is needed"
+		return row
+	}
+
+	currentSet := toSet(currentIDs)
+	targetSet := toSet(targetIDs)
+	if setEquals(currentSet, targetSet) {
+		row.Status = "already_rewritten"
+		row.Reason = "the target issue already contains the mapped destination team IDs"
+		return row
+	}
+
+	for _, sourceID := range changedSourceIDs {
+		if _, ok := currentSet[sourceID]; !ok {
+			row.Status = "source_team_ids_not_found_in_target_issue"
+			row.Reason = "the current target issue Teams field does not contain all source team IDs that need rewriting"
+			return row
+		}
+	}
+
+	row.Status = "ready"
+	return row
+}
+
+func buildPostMigrationParentLinkComparisonRows(client *jiraClient, sourceRows []ParentLinkRow, targetParentLinkFieldID string, childIssues map[string]JiraIssue, targetParents map[string]JiraIssue, currentParentCache map[string]JiraIssue) ([]PostMigrationParentLinkComparisonRow, []Finding) {
+	rows := make([]PostMigrationParentLinkComparisonRow, 0, len(sourceRows))
+	findings := make([]Finding, 0)
+	for _, sourceRow := range sourceRows {
+		row, finding := buildPostMigrationParentLinkComparisonRow(client, sourceRow, targetParentLinkFieldID, childIssues[sourceRow.IssueKey], targetParents[sourceRow.SourceParentIssueKey], currentParentCache)
+		rows = append(rows, row)
+		if finding != nil {
+			findings = append(findings, *finding)
+		}
+	}
+	return rows, findings
+}
+
+func buildPostMigrationParentLinkComparisonRow(client *jiraClient, sourceRow ParentLinkRow, targetParentLinkFieldID string, targetChild JiraIssue, targetParent JiraIssue, currentParentCache map[string]JiraIssue) (PostMigrationParentLinkComparisonRow, *Finding) {
+	row := PostMigrationParentLinkComparisonRow{
+		IssueKey:                sourceRow.IssueKey,
+		IssueID:                 sourceRow.IssueID,
+		ProjectKey:              sourceRow.ProjectKey,
+		ProjectName:             sourceRow.ProjectName,
+		ProjectType:             sourceRow.ProjectType,
+		Summary:                 sourceRow.Summary,
+		SourceParentLinkFieldID: sourceRow.ParentLinkFieldID,
+		TargetParentLinkFieldID: targetParentLinkFieldID,
+		SourceParentIssueID:     sourceRow.SourceParentIssueID,
+		SourceParentIssueKey:    sourceRow.SourceParentIssueKey,
+		TargetParentIssueID:     targetParent.ID,
+		TargetParentIssueKey:    targetParent.Key,
+	}
+
+	if strings.TrimSpace(targetChild.Key) == "" {
+		row.Status = "not_found_child"
+		row.Reason = "no target child issue with the same issue key was found"
+		return row, nil
+	}
+	if strings.TrimSpace(targetParent.Key) == "" {
+		row.Status = "not_found_parent"
+		row.Reason = "no target parent issue with the same issue key was found"
+		return row, nil
+	}
+
+	currentParentID, currentParentKey, err := resolveIssueReference(client, targetChild.Fields[targetParentLinkFieldID], currentParentCache)
+	if err != nil {
+		row.Status = "current_parent_lookup_failed"
+		row.Reason = "could not resolve the current target Parent Link issue reference"
+		return row, &Finding{Severity: SeverityWarning, Code: "post_migrate_current_parent_lookup_failed", Message: fmt.Sprintf("Could not resolve current Parent Link for child %s: %v", sourceRow.IssueKey, err)}
+	}
+	row.CurrentParentIssueID = currentParentID
+	row.CurrentParentIssueKey = currentParentKey
+
+	if row.CurrentParentIssueID == sourceRow.SourceParentIssueID || (row.CurrentParentIssueKey != "" && row.CurrentParentIssueKey == sourceRow.SourceParentIssueKey) {
+		row.Status = "ready"
+		return row, nil
+	}
+
+	if row.CurrentParentIssueID == targetParent.ID || (row.CurrentParentIssueID == "" && row.CurrentParentIssueKey != "" && row.CurrentParentIssueKey == targetParent.Key) {
+		row.Status = "already_rewritten"
+		row.Reason = "the target issue already points to the mapped target parent issue"
+		return row, nil
+	}
+
+	if row.CurrentParentIssueID == "" && row.CurrentParentIssueKey == "" {
+		row.Status = "no_current_parent_link"
+		row.Reason = "the target child issue does not currently have a Parent Link value"
+		return row, nil
+	}
+
+	row.Status = "source_parent_not_found_in_target_issue"
+	row.Reason = "the current target child issue does not point to the expected source parent reference"
+	return row, nil
+}
+
+func resolveIssueReference(client *jiraClient, raw any, cache map[string]JiraIssue) (string, string, error) {
+	ref := extractParentIssueReference(raw)
+	issueID := strings.TrimSpace(ref.idOrKey)
+	issueKey := strings.TrimSpace(ref.key)
+	if issueID == "" && issueKey == "" {
+		return "", "", nil
+	}
+	if issueKey != "" && issueID != "" {
+		return issueID, issueKey, nil
+	}
+
+	lookupKey := nonEmptyString(issueKey, issueID)
+	if cached, ok := cache[lookupKey]; ok {
+		return nonEmptyString(issueID, cached.ID), nonEmptyString(issueKey, cached.Key), nil
+	}
+	issue, err := client.GetIssue(lookupKey, []string{"summary", "project"})
+	if err != nil {
+		return issueID, issueKey, err
+	}
+	cache[lookupKey] = *issue
+	return nonEmptyString(issueID, issue.ID), nonEmptyString(issueKey, issue.Key), nil
+}
+
+func buildPostMigrationFilterMatchAndComparisonRows(sourceRows []FilterTeamClauseRow, candidatesBySource map[string][]JiraFilter, fetchedFilters map[string]JiraFilter, teamMappings []TeamMapping) ([]PostMigrationFilterMatchRow, []PostMigrationFilterComparisonRow) {
+	groupedSourceRows := map[string][]FilterTeamClauseRow{}
+	for _, row := range sourceRows {
+		if row.MatchType != "team_id" {
+			continue
+		}
+		groupedSourceRows[row.FilterID] = append(groupedSourceRows[row.FilterID], row)
+	}
+
+	filterIDs := make([]string, 0, len(groupedSourceRows))
+	for id := range groupedSourceRows {
+		filterIDs = append(filterIDs, id)
+	}
+	sort.Strings(filterIDs)
+
+	targetTeamIDs := teamTargetIDsBySourceID(teamMappings)
+	matchRows := make([]PostMigrationFilterMatchRow, 0)
+	comparisonRows := make([]PostMigrationFilterComparisonRow, 0)
+
+	for _, filterID := range filterIDs {
+		sourceGroup := groupedSourceRows[filterID]
+		representative := sourceGroup[0]
+		candidates := candidatesBySource[filterID]
+
+		switch len(candidates) {
+		case 0:
+			matchRows = append(matchRows, PostMigrationFilterMatchRow{
+				SourceFilterID:   representative.FilterID,
+				SourceFilterName: representative.FilterName,
+				SourceOwner:      representative.Owner,
+				Status:           "not_found",
+				Reason:           "no target filter matched by exact name/owner",
+			})
+			for _, row := range sourceGroup {
+				comparisonRows = append(comparisonRows, PostMigrationFilterComparisonRow{
+					SourceFilterID:   row.FilterID,
+					SourceFilterName: row.FilterName,
+					SourceOwner:      row.Owner,
+					SourceClause:     row.Clause,
+					SourceTeamID:     row.SourceTeamID,
+					Status:           "not_found",
+					Reason:           "no target filter matched by exact name/owner",
+				})
+			}
+		case 1:
+			targetFilter := fetchedFilters[candidates[0].ID]
+			targetOwner := filterOwnerLabel(targetFilter.Owner)
+			matchRows = append(matchRows, PostMigrationFilterMatchRow{
+				SourceFilterID:   representative.FilterID,
+				SourceFilterName: representative.FilterName,
+				SourceOwner:      representative.Owner,
+				TargetFilterID:   targetFilter.ID,
+				TargetFilterName: targetFilter.Name,
+				TargetOwner:      targetOwner,
+				Status:           "matched",
+			})
+			for _, row := range sourceGroup {
+				comparisonRows = append(comparisonRows, buildPostMigrationFilterComparisonRow(row, targetFilter, targetTeamIDs))
+			}
+		default:
+			for _, candidate := range candidates {
+				targetFilter := fetchedFilters[candidate.ID]
+				matchRows = append(matchRows, PostMigrationFilterMatchRow{
+					SourceFilterID:   representative.FilterID,
+					SourceFilterName: representative.FilterName,
+					SourceOwner:      representative.Owner,
+					TargetFilterID:   targetFilter.ID,
+					TargetFilterName: targetFilter.Name,
+					TargetOwner:      filterOwnerLabel(targetFilter.Owner),
+					Status:           "ambiguous",
+					Reason:           "multiple target filters matched by exact name/owner",
+				})
+			}
+			for _, row := range sourceGroup {
+				comparisonRows = append(comparisonRows, PostMigrationFilterComparisonRow{
+					SourceFilterID:   row.FilterID,
+					SourceFilterName: row.FilterName,
+					SourceOwner:      row.Owner,
+					SourceClause:     row.Clause,
+					SourceTeamID:     row.SourceTeamID,
+					Status:           "ambiguous",
+					Reason:           "multiple target filters matched by exact name/owner",
+				})
+			}
+		}
+	}
+
+	return matchRows, comparisonRows
+}
+
+func buildPostMigrationFilterComparisonRow(sourceRow FilterTeamClauseRow, targetFilter JiraFilter, targetTeamIDs map[string]string) PostMigrationFilterComparisonRow {
+	row := PostMigrationFilterComparisonRow{
+		SourceFilterID:   sourceRow.FilterID,
+		SourceFilterName: sourceRow.FilterName,
+		SourceOwner:      sourceRow.Owner,
+		SourceClause:     sourceRow.Clause,
+		SourceTeamID:     sourceRow.SourceTeamID,
+		TargetFilterID:   targetFilter.ID,
+		TargetFilterName: targetFilter.Name,
+		TargetOwner:      filterOwnerLabel(targetFilter.Owner),
+		CurrentTargetJQL: targetFilter.JQL,
+	}
+
+	targetTeamID := strings.TrimSpace(targetTeamIDs[strings.TrimSpace(sourceRow.SourceTeamID)])
+	row.TargetTeamID = targetTeamID
+	if targetTeamID == "" {
+		row.Status = "unresolved_team_mapping"
+		row.Reason = "no destination team ID was resolved for this source team"
+		return row
+	}
+
+	if sourceRow.SourceTeamID == targetTeamID {
+		row.Status = "same_id"
+		row.RewrittenTargetJQL = targetFilter.JQL
+		row.Reason = "source and target team IDs are identical; no filter JQL change is needed"
+		return row
+	}
+
+	rewrittenClause := strings.Replace(sourceRow.Clause, sourceRow.ClauseValue, targetTeamID, 1)
+	if !strings.Contains(targetFilter.JQL, sourceRow.Clause) {
+		row.Status = "source_clause_not_found_in_target_jql"
+		row.Reason = "the exact source clause was not found in the current target filter JQL"
+		return row
+	}
+
+	row.RewrittenTargetJQL = strings.Replace(targetFilter.JQL, sourceRow.Clause, rewrittenClause, 1)
+	if row.RewrittenTargetJQL == targetFilter.JQL {
+		row.Status = "no_change"
+		row.Reason = "rewriting the target filter JQL produced no change"
+		return row
+	}
+
+	row.Status = "ready"
+	return row
 }
 
 func loadMigrationState(cfg Config) (migrationState, []Finding) {
@@ -85,6 +1060,9 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	progressTotal := 13
 	if runsPreMigratePhase(cfg.Command, cfg.Phase) {
 		progressTotal += 3
+		if cfg.ParentLinkInScope {
+			progressTotal++
+		}
 		if cfg.FilterTeamIDsInScope || cfg.ScanFilters {
 			progressTotal++
 		}
@@ -198,6 +1176,9 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		findings = append(findings, newFinding(SeverityWarning, "source_issue_client", sourceClientErr.Error()))
 	} else if runsPreMigratePhase(cfg.Command, cfg.Phase) && sourceClient == nil {
 		findings = append(findings, newFinding(SeverityWarning, "issue_export_skipped", "Issue Teams-field export was skipped because no source Jira base URL was provided"))
+		if cfg.ParentLinkInScope {
+			findings = append(findings, newFinding(SeverityWarning, "parent_link_export_skipped", "Parent Link export was skipped because no source Jira base URL was provided"))
+		}
 	}
 
 	if hasErrors(findings) {
@@ -297,6 +1278,28 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 			findings = append(findings, issueFindings...)
 		}
 		progress.End()
+
+		if cfg.ParentLinkInScope {
+			progress.StartCount("Exporting issues with Parent Link values")
+			if sourceClient == nil {
+				findings = append(findings, newFinding(SeverityError, "parent_link_export_skipped", "Parent Link export is in scope but no source Jira base URL is available"))
+			} else {
+				field, rows, exportPath, parentFindings := exportIssuesWithParentLink(cfg, sourceClient, progress)
+				state.ParentLinkRows = rows
+				findings = append(findings, parentFindings...)
+				if exportPath != "" {
+					state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+						Key:   "source_issues_with_parent_link",
+						Label: "Issues with Parent Link",
+						Path:  exportPath,
+						Count: len(rows),
+					})
+					findings = append(findings, newFinding(SeverityInfo, "source_issues_with_parent_link_generated", fmt.Sprintf("Generated issues with Parent Link export: %s", exportPath)))
+				}
+				_ = field
+			}
+			progress.End()
+		}
 
 		if cfg.FilterTeamIDsInScope {
 			progress.StartCount("Resolving source filters with team IDs")
@@ -431,6 +1434,40 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 		findings = append(findings, newFinding(SeverityError, "post_migrate_issue_input_missing", "Post-migrate phase needs issue/team source data. Run pre-migrate first or provide a source Jira base URL so the tool can rebuild it."))
 	}
 
+	if parentPath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv"); ok {
+		rows, err := loadParentLinkRowsFromExport(parentPath)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_export_reuse_failed", fmt.Sprintf("Could not reuse existing parent-link export %s: %v", parentPath, err)))
+		} else {
+			state.ParentLinkRows = rows
+			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+				Key:   "source_issues_with_parent_link",
+				Label: "Issues with Parent Link",
+				Path:  parentPath,
+				Count: len(rows),
+			})
+			findings = append(findings, newFinding(SeverityInfo, "post_migrate_parent_link_export_reused", fmt.Sprintf("Reused existing parent-link export: %s", parentPath)))
+		}
+	}
+
+	if len(state.ParentLinkRows) == 0 && cfg.ParentLinkInScope && sourceClient != nil {
+		_, rows, exportPath, parentFindings := exportIssuesWithParentLink(cfg, sourceClient, nil)
+		state.ParentLinkRows = rows
+		findings = append(findings, parentFindings...)
+		if exportPath != "" {
+			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+				Key:   "source_issues_with_parent_link",
+				Label: "Issues with Parent Link",
+				Path:  exportPath,
+				Count: len(rows),
+			})
+		}
+	}
+
+	if cfg.ParentLinkInScope && len(state.ParentLinkRows) == 0 {
+		findings = append(findings, newFinding(SeverityError, "post_migrate_parent_link_input_missing", "Post-migrate phase needs the pre-migrate Parent Link export. Run pre-migrate first so source parent references are exported."))
+	}
+
 	if filterPath, ok := latestOutputFamilyPath(cfg.OutputDir, "filters-with-team-clauses.pre-migration.csv"); ok {
 		rows, err := loadFilterTeamClauseRowsFromExport(filterPath)
 		if err != nil {
@@ -463,6 +1500,8 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 			}
 		}
 	}
+
+	findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state)...)
 
 	return state, findings
 }
@@ -501,14 +1540,14 @@ func buildTeamMappings(cfg Config, sourceTeams, targetTeams []TeamDTO, sourcePla
 	mappings := make([]TeamMapping, 0, len(sourceTeams))
 	nextCreateOffset := 0
 	for _, source := range sourceTeams {
-		if target, ok := targetByID[source.ID]; ok && normalizeTitle(source.Title) != normalizeTitle(target.Title) {
-			findings = append(findings, newFinding(SeverityWarning, "team_id_title_mismatch", fmt.Sprintf("Source team %q (%d) has the same ID as destination team %q but a different title", source.Title, source.ID, target.Title)))
-		}
+		sameIDTarget, sameIDTargetExists := targetByID[source.ID]
+		sameIDTitleMismatch := sameIDTargetExists && normalizeTitle(source.Title) != normalizeTitle(sameIDTarget.Title)
 		matches := targetByTitle[normalizeTitle(source.Title)]
 		planUsage := strings.Join(planTitlesByTeamID[source.ID], ", ")
 		scopeReason := teamScopeSkipReason(cfg.TeamScope, source.Shareable)
+		var mapping TeamMapping
 		if scopeReason != "" {
-			mapping := TeamMapping{
+			mapping = TeamMapping{
 				SourceTeamID:    source.ID,
 				SourceTitle:     source.Title,
 				SourceShareable: source.Shareable,
@@ -519,16 +1558,12 @@ func buildTeamMappings(cfg Config, sourceTeams, targetTeams []TeamDTO, sourcePla
 				mapping.TargetTeamID = strconv.FormatInt(matches[0].ID, 10)
 				mapping.TargetTitle = matches[0].Title
 			}
-			mappings = append(mappings, mapping)
 			if source.Shareable {
 				skippedSharedCount++
 			} else {
 				skippedNonSharedCount++
 			}
-			continue
-		}
-
-		if !source.Shareable && len(matches) == 0 {
+		} else if !source.Shareable && len(matches) == 0 {
 			reason := "non-shared team must be created manually in the destination plan before migration"
 			if !targetPlanExistsBySourceTeamID[source.ID] {
 				reason = "non-shared team requires a destination plan to exist first, then manual team creation before migration"
@@ -536,48 +1571,58 @@ func buildTeamMappings(cfg Config, sourceTeams, targetTeams []TeamDTO, sourcePla
 			if planUsage != "" {
 				reason = fmt.Sprintf("%s; source plan usage: %s", reason, planUsage)
 			}
-			mappings = append(mappings, TeamMapping{
+			mapping = TeamMapping{
 				SourceTeamID:    source.ID,
 				SourceTitle:     source.Title,
 				SourceShareable: source.Shareable,
 				TargetTitle:     source.Title,
 				Decision:        "skipped",
 				Reason:          reason,
-			})
+			}
 			manualPrerequisiteTitles = append(manualPrerequisiteTitles, source.Title)
-			continue
+		} else {
+			switch len(matches) {
+			case 0:
+				nextCreateOffset++
+				mapping = TeamMapping{
+					SourceTeamID:    source.ID,
+					SourceTitle:     source.Title,
+					SourceShareable: source.Shareable,
+					TargetTeamID:    expectedSequentialID(len(targetTeams), nextCreateOffset),
+					TargetTitle:     source.Title,
+					Decision:        "add",
+				}
+			case 1:
+				mapping = TeamMapping{
+					SourceTeamID:    source.ID,
+					SourceTitle:     source.Title,
+					SourceShareable: source.Shareable,
+					TargetTeamID:    strconv.FormatInt(matches[0].ID, 10),
+					TargetTitle:     matches[0].Title,
+					Decision:        "merge",
+				}
+			default:
+				mapping = TeamMapping{
+					SourceTeamID:    source.ID,
+					SourceTitle:     source.Title,
+					SourceShareable: source.Shareable,
+					Decision:        "conflict",
+					Reason:          "multiple destination teams match normalized title",
+					ConflictReason:  "multiple destination teams match normalized title",
+				}
+			}
 		}
 
-		switch len(matches) {
-		case 0:
-			nextCreateOffset++
-			mappings = append(mappings, TeamMapping{
-				SourceTeamID:    source.ID,
-				SourceTitle:     source.Title,
-				SourceShareable: source.Shareable,
-				TargetTeamID:    expectedSequentialID(len(targetTeams), nextCreateOffset),
-				TargetTitle:     source.Title,
-				Decision:        "add",
-			})
-		case 1:
-			mappings = append(mappings, TeamMapping{
-				SourceTeamID:    source.ID,
-				SourceTitle:     source.Title,
-				SourceShareable: source.Shareable,
-				TargetTeamID:    strconv.FormatInt(matches[0].ID, 10),
-				TargetTitle:     matches[0].Title,
-				Decision:        "merge",
-			})
-		default:
-			mappings = append(mappings, TeamMapping{
-				SourceTeamID:    source.ID,
-				SourceTitle:     source.Title,
-				SourceShareable: source.Shareable,
-				Decision:        "conflict",
-				Reason:          "multiple destination teams match normalized title",
-				ConflictReason:  "multiple destination teams match normalized title",
-			})
+		if sameIDTitleMismatch {
+			findings = append(findings, newFinding(SeverityWarning, "team_id_title_mismatch", fmt.Sprintf(
+				"Source team %q (%d) has the same ID as destination team %q but a different title. Mitigation: %s",
+				source.Title,
+				source.ID,
+				sameIDTarget.Title,
+				teamIDTitleMismatchMitigation(mapping),
+			)))
 		}
+		mappings = append(mappings, mapping)
 	}
 	if skippedSharedCount > 0 {
 		findings = append(findings, newFinding(SeverityInfo, "team_scope_skipped_shared", fmt.Sprintf("Skipped %d shared teams because team scope is %s", skippedSharedCount, cfg.TeamScope)))
@@ -589,6 +1634,24 @@ func buildTeamMappings(cfg Config, sourceTeams, targetTeams []TeamDTO, sourcePla
 		findings = append(findings, newFinding(SeverityWarning, "non_shared_team_manual_prerequisite", fmt.Sprintf("Skipped %d non-shared teams that must already exist in destination plans before migration: %s", len(manualPrerequisiteTitles), strings.Join(manualPrerequisiteTitles, ", "))))
 	}
 	return mappings, findings
+}
+
+func teamIDTitleMismatchMitigation(mapping TeamMapping) string {
+	switch mapping.Decision {
+	case "add", "created":
+		return fmt.Sprintf("the tool will add %q as a separate destination team with a new ID instead of reusing the existing numeric ID match", mapping.SourceTitle)
+	case "merge":
+		return fmt.Sprintf("title-based matching will reuse destination team %q (%s), not the conflicting same-ID team", mapping.TargetTitle, mapping.TargetTeamID)
+	case "skipped":
+		if strings.TrimSpace(mapping.Reason) != "" {
+			return fmt.Sprintf("this team is currently skipped: %s", mapping.Reason)
+		}
+		return "this team is currently skipped and will not reuse the conflicting same-ID destination team"
+	case "conflict":
+		return "automatic migration is blocked until the team mapping is resolved manually"
+	default:
+		return "the tool will use title-based mapping rather than the conflicting same numeric ID"
+	}
 }
 
 func buildResourcePlans(state migrationState) ([]ResourcePlan, []Finding) {
@@ -772,6 +1835,7 @@ func applyMigration(client *jiraClient, state *migrationState) ([]Action, []Find
 				continue
 			}
 			mapping.TargetTeamID = strconv.FormatInt(createdID, 10)
+			mapping.TargetTitle = mapping.SourceTitle
 			mapping.Decision = "created"
 			teamIDs[mapping.SourceTeamID] = createdID
 			actions = append(actions, Action{
@@ -809,6 +1873,547 @@ func applyMigration(client *jiraClient, state *migrationState) ([]Action, []Find
 	}
 
 	return actions, findings
+}
+
+func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrationState) ([]Action, []Finding) {
+	var actions []Action
+	var findings []Finding
+
+	issueActions, issueFindings, issueResults := applyPostMigrationIssueCorrections(client, state)
+	actions = append(actions, issueActions...)
+	findings = append(findings, issueFindings...)
+	state.IssueUpdateResults = issueResults
+	if path, err := writePostMigrationIssueUpdateResultsExport(cfg, issueResults); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_results_export_failed", err.Error()))
+	} else if path != "" {
+		artifact := Artifact{
+			Key:   "post_migrate_issue_update_results",
+			Label: "Post-migration issue update results",
+			Path:  path,
+			Count: len(issueResults),
+		}
+		state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+		actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_issue_results_export_generated", fmt.Sprintf("Generated post-migration issue update results: %s", path)))
+	}
+
+	parentLinkActions, parentLinkFindings, parentLinkResults := applyPostMigrationParentLinkCorrections(client, state)
+	actions = append(actions, parentLinkActions...)
+	findings = append(findings, parentLinkFindings...)
+	state.ParentLinkUpdateResults = parentLinkResults
+	if path, err := writePostMigrationParentLinkUpdateResultsExport(cfg, parentLinkResults); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_results_export_failed", err.Error()))
+	} else if path != "" {
+		artifact := Artifact{
+			Key:   "post_migrate_parent_link_update_results",
+			Label: "Post-migration parent-link update results",
+			Path:  path,
+			Count: len(parentLinkResults),
+		}
+		state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+		actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_parent_link_results_export_generated", fmt.Sprintf("Generated post-migration parent-link update results: %s", path)))
+	}
+
+	filterActions, filterFindings, filterResults := applyPostMigrationFilterCorrections(client, state)
+	actions = append(actions, filterActions...)
+	findings = append(findings, filterFindings...)
+	state.FilterUpdateResults = filterResults
+	if path, err := writePostMigrationFilterUpdateResultsExport(cfg, filterResults); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_results_export_failed", err.Error()))
+	} else if path != "" {
+		artifact := Artifact{
+			Key:   "post_migrate_filter_update_results",
+			Label: "Post-migration filter update results",
+			Path:  path,
+			Count: len(filterResults),
+		}
+		state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+		actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_results_export_generated", fmt.Sprintf("Generated post-migration filter update results: %s", path)))
+	}
+
+	return actions, findings
+}
+
+func applyPostMigrationIssueCorrections(client *jiraClient, state *migrationState) ([]Action, []Finding, []PostMigrationIssueResultRow) {
+	if len(state.IssueComparisons) == 0 {
+		return nil, nil, nil
+	}
+
+	targetTeamIDs := teamTargetIDsBySourceID(state.TeamMappings)
+	results := make([]PostMigrationIssueResultRow, 0, len(state.IssueComparisons))
+	actions := make([]Action, 0)
+	findings := make([]Finding, 0)
+
+	for _, comparison := range state.IssueComparisons {
+		result := PostMigrationIssueResultRow{
+			IssueKey:           comparison.IssueKey,
+			SourceTeamsFieldID: comparison.SourceTeamsFieldID,
+			TargetTeamsFieldID: comparison.TargetTeamsFieldID,
+			SourceTeamIDs:      comparison.SourceTeamIDs,
+			TargetTeamIDs:      comparison.TargetTeamIDs,
+			Status:             comparison.Status,
+			Message:            comparison.Reason,
+		}
+
+		if comparison.Status != "ready" {
+			results = append(results, result)
+			continue
+		}
+
+		targetIssue, err := client.GetIssue(comparison.IssueKey, []string{comparison.TargetTeamsFieldID})
+		if err != nil {
+			result.Status = "fetch_failed"
+			result.Message = fmt.Sprintf("Could not load current target issue state: %v", err)
+			results = append(results, result)
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_fetch_failed", fmt.Sprintf("Could not fetch target issue %s before applying corrections: %v", comparison.IssueKey, err)))
+			continue
+		}
+
+		raw := targetIssue.Fields[comparison.TargetTeamsFieldID]
+		currentIDs := extractTeamFieldIDs(raw)
+		result.CurrentTargetTeamIDs = strings.Join(currentIDs, ",")
+		sourceIDs := splitDelimitedValues(comparison.SourceTeamIDs)
+		targetIDs := make([]string, 0, len(sourceIDs))
+		replacements := map[string]string{}
+		changedSourceIDs := make([]string, 0, len(sourceIDs))
+		unresolved := false
+		for _, sourceID := range sourceIDs {
+			targetID := strings.TrimSpace(targetTeamIDs[sourceID])
+			if targetID == "" {
+				unresolved = true
+				break
+			}
+			targetIDs = append(targetIDs, targetID)
+			replacements[sourceID] = targetID
+			if targetID != sourceID {
+				changedSourceIDs = append(changedSourceIDs, sourceID)
+			}
+		}
+		if unresolved {
+			result.Status = "unresolved_team_mapping"
+			result.Message = "No destination team ID was resolved for one or more source team IDs on this issue"
+			results = append(results, result)
+			continue
+		}
+
+		if len(changedSourceIDs) == 0 {
+			result.Status = "same_id"
+			result.Message = "Source and target team IDs are identical; no issue update is needed"
+			results = append(results, result)
+			continue
+		}
+
+		currentSet := toSet(currentIDs)
+		targetSet := toSet(targetIDs)
+		if setEquals(currentSet, targetSet) {
+			result.Status = "already_rewritten"
+			result.Message = "The target issue already contains the mapped destination team IDs"
+			results = append(results, result)
+			continue
+		}
+
+		missingSource := false
+		for _, sourceID := range changedSourceIDs {
+			if _, ok := currentSet[sourceID]; !ok {
+				missingSource = true
+				break
+			}
+		}
+		if missingSource {
+			result.Status = "source_team_ids_not_found_in_target_issue"
+			result.Message = "The current target issue Teams field does not contain all source team IDs that need rewriting"
+			results = append(results, result)
+			continue
+		}
+
+		rewrittenRaw, changed := rewriteTeamFieldIDs(raw, replacements)
+		if !changed || reflect.DeepEqual(rewrittenRaw, raw) {
+			result.Status = "no_change"
+			result.Message = "Rewriting the target issue Teams field produced no change"
+			results = append(results, result)
+			continue
+		}
+
+		if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: rewrittenRaw}); err != nil {
+			result.Status = "update_failed"
+			result.Message = fmt.Sprintf("Could not update target issue: %v", err)
+			results = append(results, result)
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_update_failed", fmt.Sprintf("Could not update issue %s: %v", comparison.IssueKey, err)))
+			continue
+		}
+
+		result.Status = "updated"
+		result.Message = "Updated target issue Teams field to the mapped destination team IDs"
+		result.CurrentTargetTeamIDs = strings.Join(targetIDs, ",")
+		results = append(results, result)
+		actions = append(actions, Action{
+			Kind:     "post_migrate_issue_update",
+			SourceID: comparison.IssueKey,
+			Status:   "updated",
+			Details:  fmt.Sprintf("teams field %s -> %s", comparison.SourceTeamsFieldID, comparison.TargetTeamsFieldID),
+		})
+	}
+
+	return actions, findings, results
+}
+
+func applyPostMigrationParentLinkCorrections(client *jiraClient, state *migrationState) ([]Action, []Finding, []PostMigrationParentLinkResultRow) {
+	if len(state.ParentLinkComparisons) == 0 {
+		return nil, nil, nil
+	}
+
+	results := make([]PostMigrationParentLinkResultRow, 0, len(state.ParentLinkComparisons))
+	actions := make([]Action, 0)
+	findings := make([]Finding, 0)
+	currentParentCache := map[string]JiraIssue{}
+
+	for _, comparison := range state.ParentLinkComparisons {
+		result := PostMigrationParentLinkResultRow{
+			IssueKey:                comparison.IssueKey,
+			SourceParentLinkFieldID: comparison.SourceParentLinkFieldID,
+			TargetParentLinkFieldID: comparison.TargetParentLinkFieldID,
+			SourceParentIssueID:     comparison.SourceParentIssueID,
+			SourceParentIssueKey:    comparison.SourceParentIssueKey,
+			TargetParentIssueID:     comparison.TargetParentIssueID,
+			TargetParentIssueKey:    comparison.TargetParentIssueKey,
+			CurrentParentIssueID:    comparison.CurrentParentIssueID,
+			CurrentParentIssueKey:   comparison.CurrentParentIssueKey,
+			Status:                  comparison.Status,
+			Message:                 comparison.Reason,
+		}
+
+		if comparison.Status != "ready" {
+			results = append(results, result)
+			continue
+		}
+
+		targetChild, err := client.GetIssue(comparison.IssueKey, []string{comparison.TargetParentLinkFieldID})
+		if err != nil {
+			result.Status = "fetch_failed"
+			result.Message = fmt.Sprintf("Could not load current target issue state: %v", err)
+			results = append(results, result)
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_child_fetch_failed", fmt.Sprintf("Could not fetch target child issue %s before applying Parent Link correction: %v", comparison.IssueKey, err)))
+			continue
+		}
+
+		currentParentID, currentParentKey, err := resolveIssueReference(client, targetChild.Fields[comparison.TargetParentLinkFieldID], currentParentCache)
+		if err != nil {
+			result.Status = "current_parent_lookup_failed"
+			result.Message = fmt.Sprintf("Could not resolve the current target Parent Link issue reference: %v", err)
+			results = append(results, result)
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_current_lookup_failed", fmt.Sprintf("Could not resolve current Parent Link for child %s: %v", comparison.IssueKey, err)))
+			continue
+		}
+		result.CurrentParentIssueID = currentParentID
+		result.CurrentParentIssueKey = currentParentKey
+
+		if currentParentID != comparison.SourceParentIssueID && (comparison.SourceParentIssueKey == "" || currentParentKey != comparison.SourceParentIssueKey) {
+			if currentParentID == comparison.TargetParentIssueID || (currentParentID == "" && currentParentKey != "" && currentParentKey == comparison.TargetParentIssueKey) {
+				result.Status = "already_rewritten"
+				result.Message = "The target child issue already points to the mapped target parent issue"
+				results = append(results, result)
+				continue
+			}
+			result.Status = "source_parent_not_found_in_target_issue"
+			result.Message = "The current target child issue does not point to the expected source parent reference"
+			results = append(results, result)
+			continue
+		}
+
+		if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{
+			comparison.TargetParentLinkFieldID: map[string]any{"id": comparison.TargetParentIssueID},
+		}); err != nil {
+			result.Status = "update_failed"
+			result.Message = fmt.Sprintf("Could not update target issue Parent Link: %v", err)
+			results = append(results, result)
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_update_failed", fmt.Sprintf("Could not update Parent Link on issue %s: %v", comparison.IssueKey, err)))
+			continue
+		}
+
+		result.Status = "updated"
+		result.Message = "Updated target issue Parent Link to the mapped target parent issue"
+		result.CurrentParentIssueID = comparison.TargetParentIssueID
+		result.CurrentParentIssueKey = comparison.TargetParentIssueKey
+		results = append(results, result)
+		actions = append(actions, Action{
+			Kind:     "post_migrate_parent_link_update",
+			SourceID: comparison.IssueKey,
+			TargetID: comparison.TargetParentIssueID,
+			Status:   "updated",
+			Details:  fmt.Sprintf("%s -> %s", comparison.SourceParentIssueKey, comparison.TargetParentIssueKey),
+		})
+	}
+
+	return actions, findings, results
+}
+
+type postMigrationFilterRewritePlan struct {
+	SourceFilterID     string
+	SourceFilterName   string
+	TargetFilterID     string
+	TargetFilterName   string
+	CurrentTargetJQL   string
+	RewrittenTargetJQL string
+	Status             string
+	Message            string
+}
+
+func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationState) ([]Action, []Finding, []PostMigrationFilterResultRow) {
+	if len(state.FilterComparisons) == 0 {
+		return nil, nil, nil
+	}
+
+	filterByID := map[string]JiraFilter{}
+	for _, filter := range state.TargetFilters {
+		filterByID[filter.ID] = filter
+	}
+
+	plans := buildPostMigrationFilterRewritePlans(state.FilterComparisons, filterByID)
+	results := make([]PostMigrationFilterResultRow, 0, len(plans))
+	actions := make([]Action, 0, len(plans))
+	findings := make([]Finding, 0)
+
+	for _, plan := range plans {
+		result := PostMigrationFilterResultRow{
+			SourceFilterID:     plan.SourceFilterID,
+			SourceFilterName:   plan.SourceFilterName,
+			TargetFilterID:     plan.TargetFilterID,
+			TargetFilterName:   plan.TargetFilterName,
+			CurrentTargetJQL:   plan.CurrentTargetJQL,
+			RewrittenTargetJQL: plan.RewrittenTargetJQL,
+			Status:             plan.Status,
+			Message:            plan.Message,
+		}
+
+		if plan.Status != "ready" {
+			results = append(results, result)
+			continue
+		}
+
+		filter, err := client.GetFilter(plan.TargetFilterID)
+		if err != nil {
+			result.Status = "fetch_failed"
+			result.Message = fmt.Sprintf("Could not load current target filter state: %v", err)
+			results = append(results, result)
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_fetch_failed", fmt.Sprintf("Could not fetch target filter %s before applying corrections: %v", plan.TargetFilterID, err)))
+			continue
+		}
+
+		if filter.JQL == plan.RewrittenTargetJQL {
+			result.Status = "already_rewritten"
+			result.Message = "The target filter already contains the rewritten destination team IDs"
+			result.CurrentTargetJQL = filter.JQL
+			results = append(results, result)
+			continue
+		}
+		if filter.JQL != plan.CurrentTargetJQL {
+			result.Status = "drifted"
+			result.Message = "The current target filter JQL has changed since the comparison artifact was generated"
+			result.CurrentTargetJQL = filter.JQL
+			results = append(results, result)
+			continue
+		}
+
+		updated, err := client.UpdateFilter(plan.TargetFilterID, JiraFilterUpdatePayload{
+			Name:        filter.Name,
+			Description: filter.Description,
+			JQL:         plan.RewrittenTargetJQL,
+		})
+		if err != nil {
+			result.Status = "update_failed"
+			result.Message = fmt.Sprintf("Could not update target filter: %v", err)
+			results = append(results, result)
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_update_failed", fmt.Sprintf("Could not update filter %s: %v", plan.TargetFilterID, err)))
+			continue
+		}
+
+		result.Status = "updated"
+		result.Message = "Updated target filter JQL to the mapped destination team IDs"
+		if updated != nil && strings.TrimSpace(updated.JQL) != "" {
+			result.CurrentTargetJQL = updated.JQL
+		} else {
+			result.CurrentTargetJQL = plan.RewrittenTargetJQL
+		}
+		results = append(results, result)
+		actions = append(actions, Action{
+			Kind:     "post_migrate_filter_update",
+			SourceID: plan.SourceFilterID,
+			TargetID: plan.TargetFilterID,
+			Status:   "updated",
+			Details:  plan.TargetFilterName,
+		})
+	}
+
+	return actions, findings, results
+}
+
+func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRow, filters map[string]JiraFilter) []postMigrationFilterRewritePlan {
+	grouped := map[string][]PostMigrationFilterComparisonRow{}
+	blockedWithoutTarget := make([]postMigrationFilterRewritePlan, 0)
+	for _, row := range rows {
+		targetID := strings.TrimSpace(row.TargetFilterID)
+		if targetID == "" {
+			blockedWithoutTarget = append(blockedWithoutTarget, postMigrationFilterRewritePlan{
+				SourceFilterID:     row.SourceFilterID,
+				SourceFilterName:   row.SourceFilterName,
+				CurrentTargetJQL:   row.CurrentTargetJQL,
+				RewrittenTargetJQL: row.RewrittenTargetJQL,
+				Status:             row.Status,
+				Message:            row.Reason,
+			})
+			continue
+		}
+		grouped[targetID] = append(grouped[targetID], row)
+	}
+
+	targetIDs := make([]string, 0, len(grouped))
+	for targetID := range grouped {
+		targetIDs = append(targetIDs, targetID)
+	}
+	sort.Strings(targetIDs)
+
+	plans := append([]postMigrationFilterRewritePlan{}, blockedWithoutTarget...)
+	for _, targetID := range targetIDs {
+		group := grouped[targetID]
+		representative := group[0]
+		filter := filters[targetID]
+		currentJQL := representative.CurrentTargetJQL
+		if strings.TrimSpace(filter.JQL) != "" {
+			currentJQL = filter.JQL
+		}
+
+		blockingReason := ""
+		rewrittenJQL := currentJQL
+		readyRows := make([]PostMigrationFilterComparisonRow, 0, len(group))
+		sort.SliceStable(group, func(i, j int) bool {
+			return len(group[i].SourceClause) > len(group[j].SourceClause)
+		})
+
+		for _, row := range group {
+			switch row.Status {
+			case "ready":
+				readyRows = append(readyRows, row)
+			case "same_id", "already_rewritten", "no_change":
+				continue
+			default:
+				blockingReason = row.Reason
+			}
+			if blockingReason != "" {
+				break
+			}
+		}
+
+		if blockingReason != "" {
+			plans = append(plans, postMigrationFilterRewritePlan{
+				SourceFilterID:     representative.SourceFilterID,
+				SourceFilterName:   representative.SourceFilterName,
+				TargetFilterID:     representative.TargetFilterID,
+				TargetFilterName:   representative.TargetFilterName,
+				CurrentTargetJQL:   currentJQL,
+				RewrittenTargetJQL: currentJQL,
+				Status:             "blocked",
+				Message:            blockingReason,
+			})
+			continue
+		}
+
+		for _, row := range readyRows {
+			rewrittenClause := strings.Replace(row.SourceClause, row.SourceTeamID, row.TargetTeamID, 1)
+			if strings.Contains(rewrittenJQL, row.SourceClause) {
+				rewrittenJQL = strings.Replace(rewrittenJQL, row.SourceClause, rewrittenClause, 1)
+				continue
+			}
+			if strings.Contains(rewrittenJQL, rewrittenClause) {
+				continue
+			}
+			blockingReason = "the current target filter JQL no longer contains the expected source clause"
+			break
+		}
+
+		status := "ready"
+		message := "Target filter JQL is ready to be rewritten"
+		if blockingReason != "" {
+			status = "blocked"
+			message = blockingReason
+			rewrittenJQL = currentJQL
+		} else if rewrittenJQL == currentJQL {
+			status = "no_change"
+			message = "Rewriting the target filter JQL produced no change"
+		}
+
+		plans = append(plans, postMigrationFilterRewritePlan{
+			SourceFilterID:     representative.SourceFilterID,
+			SourceFilterName:   representative.SourceFilterName,
+			TargetFilterID:     representative.TargetFilterID,
+			TargetFilterName:   representative.TargetFilterName,
+			CurrentTargetJQL:   currentJQL,
+			RewrittenTargetJQL: rewrittenJQL,
+			Status:             status,
+			Message:            message,
+		})
+	}
+
+	sort.SliceStable(plans, func(i, j int) bool {
+		left := nonEmptyString(plans[i].TargetFilterID, plans[i].SourceFilterID)
+		right := nonEmptyString(plans[j].TargetFilterID, plans[j].SourceFilterID)
+		if left == right {
+			return plans[i].SourceFilterName < plans[j].SourceFilterName
+		}
+		return left < right
+	})
+	return plans
+}
+
+func rewriteTeamFieldIDs(raw any, replacements map[string]string) (any, bool) {
+	switch v := raw.(type) {
+	case nil:
+		return nil, false
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if targetID, ok := replacements[trimmed]; ok {
+			return targetID, targetID != v
+		}
+		return v, false
+	case float64:
+		current := strconv.FormatInt(int64(v), 10)
+		targetID, ok := replacements[current]
+		if !ok {
+			return v, false
+		}
+		targetNumeric, err := strconv.ParseInt(targetID, 10, 64)
+		if err != nil {
+			return v, false
+		}
+		return float64(targetNumeric), targetNumeric != int64(v)
+	case []any:
+		out := make([]any, len(v))
+		changed := false
+		for i, item := range v {
+			rewritten, itemChanged := rewriteTeamFieldIDs(item, replacements)
+			out[i] = rewritten
+			changed = changed || itemChanged
+		}
+		if !changed {
+			return v, false
+		}
+		return out, true
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		changed := false
+		for key, value := range v {
+			rewritten, valueChanged := rewriteTeamFieldIDs(value, replacements)
+			out[key] = rewritten
+			changed = changed || valueChanged
+		}
+		if !changed {
+			return v, false
+		}
+		return out, true
+	default:
+		return v, false
+	}
 }
 
 func loadIdentityMappings(path string) (IdentityMapping, error) {
@@ -919,6 +2524,444 @@ func writeGeneratedIdentityMapping(cfg Config, mappings IdentityMapping) (string
 		return "", err
 	}
 	return path, nil
+}
+
+func writeTeamIDMappingExport(cfg Config, mappings []TeamMapping) (string, error) {
+	if len(mappings) == 0 {
+		return "", nil
+	}
+	return writeCSVExport(
+		cfg,
+		"team-id-mapping.migration.csv",
+		[]string{"Source Team ID", "Source Team Name", "Source Shareable", "Target Team ID", "Target Team Name", "Migration Status", "Reason", "Conflict Reason"},
+		teamIDMappingRows(mappings),
+	)
+}
+
+func teamIDMappingRows(mappings []TeamMapping) [][]string {
+	rows := make([][]string, 0, len(mappings))
+	for _, mapping := range mappings {
+		targetTitle := strings.TrimSpace(mapping.TargetTitle)
+		if targetTitle == "" && strings.TrimSpace(mapping.TargetTeamID) != "" {
+			targetTitle = mapping.SourceTitle
+		}
+		rows = append(rows, []string{
+			strconv.FormatInt(mapping.SourceTeamID, 10),
+			mapping.SourceTitle,
+			strconv.FormatBool(mapping.SourceShareable),
+			mapping.TargetTeamID,
+			targetTitle,
+			mapping.Decision,
+			mapping.Reason,
+			mapping.ConflictReason,
+		})
+	}
+	return rows
+}
+
+func writePostMigrationIssueTeamExport(cfg Config, rows []IssueTeamRow, mappings []TeamMapping) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	return writeCSVExport(
+		cfg,
+		"issues-with-teams.post-migration.csv",
+		[]string{"Issue Key", "Project Key", "Project Name", "Project Type", "Summary", "Source Team IDs", "Source Team Names", "Teams Field ID", "Target Team IDs"},
+		postMigrationIssueTeamRows(rows, mappings),
+	)
+}
+
+func writeTargetIssueSnapshotExport(cfg Config, rows []TargetIssueSnapshotRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.IssueKey,
+			row.ProjectKey,
+			row.ProjectName,
+			row.ProjectType,
+			row.Summary,
+			row.TargetTeamsFieldID,
+			row.CurrentTargetTeamIDs,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"target-issues.snapshot.post-migration.csv",
+		[]string{"Issue Key", "Project Key", "Project Name", "Project Type", "Summary", "Target Teams Field ID", "Current Target Team IDs"},
+		records,
+	)
+}
+
+func writePostMigrationIssueComparisonExport(cfg Config, rows []PostMigrationIssueComparisonRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.IssueKey,
+			row.ProjectKey,
+			row.ProjectName,
+			row.ProjectType,
+			row.Summary,
+			row.SourceTeamsFieldID,
+			row.TargetTeamsFieldID,
+			row.SourceTeamIDs,
+			row.SourceTeamNames,
+			row.TargetTeamIDs,
+			row.CurrentTargetTeamIDs,
+			row.Status,
+			row.Reason,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"issue-team-comparison.post-migration.csv",
+		[]string{"Issue Key", "Project Key", "Project Name", "Project Type", "Summary", "Source Teams Field ID", "Target Teams Field ID", "Source Team IDs", "Source Team Names", "Target Team IDs", "Current Target Team IDs", "Status", "Reason"},
+		records,
+	)
+}
+
+func writePostMigrationIssueUpdateResultsExport(cfg Config, rows []PostMigrationIssueResultRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.IssueKey,
+			row.SourceTeamsFieldID,
+			row.TargetTeamsFieldID,
+			row.SourceTeamIDs,
+			row.TargetTeamIDs,
+			row.CurrentTargetTeamIDs,
+			row.Status,
+			row.Message,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"issue-update-results.post-migration.csv",
+		[]string{"Issue Key", "Source Teams Field ID", "Target Teams Field ID", "Source Team IDs", "Target Team IDs", "Current Target Team IDs", "Status", "Message"},
+		records,
+	)
+}
+
+func writePostMigrationParentLinkExport(cfg Config, rows []ParentLinkRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.IssueKey,
+			row.IssueID,
+			row.ProjectKey,
+			row.ProjectName,
+			row.ProjectType,
+			row.Summary,
+			row.ParentLinkFieldID,
+			row.SourceParentIssueID,
+			row.SourceParentIssueKey,
+			row.SourceParentSummary,
+			row.SourceParentProjectKey,
+			row.SourceParentIssueKey,
+			"",
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"issues-with-parent-link.post-migration.csv",
+		[]string{"Issue Key", "Issue ID", "Project Key", "Project Name", "Project Type", "Summary", "Parent Link Field ID", "Source Parent Issue ID", "Source Parent Issue Key", "Source Parent Summary", "Source Parent Project Key", "Target Parent Issue Key", "Target Parent Issue ID"},
+		records,
+	)
+}
+
+func writeTargetParentLinkSnapshotExport(cfg Config, rows []TargetParentLinkSnapshotRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.IssueKey,
+			row.IssueID,
+			row.ProjectKey,
+			row.ProjectName,
+			row.ProjectType,
+			row.Summary,
+			row.TargetParentLinkFieldID,
+			row.CurrentParentIssueID,
+			row.CurrentParentIssueKey,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"target-parent-link-issues.snapshot.post-migration.csv",
+		[]string{"Issue Key", "Issue ID", "Project Key", "Project Name", "Project Type", "Summary", "Target Parent Link Field ID", "Current Parent Issue ID", "Current Parent Issue Key"},
+		records,
+	)
+}
+
+func writePostMigrationParentLinkComparisonExport(cfg Config, rows []PostMigrationParentLinkComparisonRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.IssueKey,
+			row.IssueID,
+			row.ProjectKey,
+			row.ProjectName,
+			row.ProjectType,
+			row.Summary,
+			row.SourceParentLinkFieldID,
+			row.TargetParentLinkFieldID,
+			row.SourceParentIssueID,
+			row.SourceParentIssueKey,
+			row.TargetParentIssueID,
+			row.TargetParentIssueKey,
+			row.CurrentParentIssueID,
+			row.CurrentParentIssueKey,
+			row.Status,
+			row.Reason,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"parent-link-comparison.post-migration.csv",
+		[]string{"Issue Key", "Issue ID", "Project Key", "Project Name", "Project Type", "Summary", "Source Parent Link Field ID", "Target Parent Link Field ID", "Source Parent Issue ID", "Source Parent Issue Key", "Target Parent Issue ID", "Target Parent Issue Key", "Current Parent Issue ID", "Current Parent Issue Key", "Status", "Reason"},
+		records,
+	)
+}
+
+func writePostMigrationParentLinkUpdateResultsExport(cfg Config, rows []PostMigrationParentLinkResultRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.IssueKey,
+			row.SourceParentLinkFieldID,
+			row.TargetParentLinkFieldID,
+			row.SourceParentIssueID,
+			row.SourceParentIssueKey,
+			row.TargetParentIssueID,
+			row.TargetParentIssueKey,
+			row.CurrentParentIssueID,
+			row.CurrentParentIssueKey,
+			row.Status,
+			row.Message,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"parent-link-update-results.post-migration.csv",
+		[]string{"Issue Key", "Source Parent Link Field ID", "Target Parent Link Field ID", "Source Parent Issue ID", "Source Parent Issue Key", "Target Parent Issue ID", "Target Parent Issue Key", "Current Parent Issue ID", "Current Parent Issue Key", "Status", "Message"},
+		records,
+	)
+}
+
+func postMigrationIssueTeamRows(rows []IssueTeamRow, mappings []TeamMapping) [][]string {
+	targetTeamIDs := teamTargetIDsBySourceID(mappings)
+	out := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, []string{
+			row.IssueKey,
+			row.ProjectKey,
+			row.ProjectName,
+			row.ProjectType,
+			row.Summary,
+			row.SourceTeamIDs,
+			row.SourceTeamNames,
+			row.TeamsFieldID,
+			strings.Join(mappedTargetTeamIDsForExport(row.SourceTeamIDs, targetTeamIDs), ","),
+		})
+	}
+	return out
+}
+
+func writePostMigrationFilterTeamExport(cfg Config, rows []FilterTeamClauseRow, mappings []TeamMapping) (string, int, error) {
+	records := postMigrationFilterTeamRows(rows, mappings)
+	if len(records) == 0 {
+		return "", 0, nil
+	}
+	path, err := writeCSVExport(
+		cfg,
+		"filters-with-team-clauses.post-migration.csv",
+		[]string{"Filter ID", "Filter Name", "Owner", "Match Type", "Clause Value", "Source Team ID", "Source Team Name", "Matched Clause", "JQL", "Target Team ID"},
+		records,
+	)
+	if err != nil {
+		return "", 0, err
+	}
+	return path, len(records), nil
+}
+
+func writeTargetFilterSnapshotExport(cfg Config, rows []TargetFilterSnapshotRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.TargetFilterID,
+			row.TargetFilterName,
+			row.TargetOwner,
+			row.Description,
+			row.JQL,
+			row.ViewURL,
+			row.SearchURL,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"target-filters.snapshot.post-migration.csv",
+		[]string{"Target Filter ID", "Target Filter Name", "Target Owner", "Description", "JQL", "View URL", "Search URL"},
+		records,
+	)
+}
+
+func writePostMigrationFilterTargetMatchExport(cfg Config, rows []PostMigrationFilterMatchRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.SourceFilterID,
+			row.SourceFilterName,
+			row.SourceOwner,
+			row.TargetFilterID,
+			row.TargetFilterName,
+			row.TargetOwner,
+			row.Status,
+			row.Reason,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"filter-target-match.post-migration.csv",
+		[]string{"Source Filter ID", "Source Filter Name", "Source Owner", "Target Filter ID", "Target Filter Name", "Target Owner", "Status", "Reason"},
+		records,
+	)
+}
+
+func writePostMigrationFilterComparisonExport(cfg Config, rows []PostMigrationFilterComparisonRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.SourceFilterID,
+			row.SourceFilterName,
+			row.SourceOwner,
+			row.SourceClause,
+			row.SourceTeamID,
+			row.TargetFilterID,
+			row.TargetFilterName,
+			row.TargetOwner,
+			row.TargetTeamID,
+			row.CurrentTargetJQL,
+			row.RewrittenTargetJQL,
+			row.Status,
+			row.Reason,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"filter-jql-comparison.post-migration.csv",
+		[]string{"Source Filter ID", "Source Filter Name", "Source Owner", "Source Clause", "Source Team ID", "Target Filter ID", "Target Filter Name", "Target Owner", "Target Team ID", "Current Target JQL", "Rewritten Target JQL", "Status", "Reason"},
+		records,
+	)
+}
+
+func writePostMigrationFilterUpdateResultsExport(cfg Config, rows []PostMigrationFilterResultRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.SourceFilterID,
+			row.SourceFilterName,
+			row.TargetFilterID,
+			row.TargetFilterName,
+			row.CurrentTargetJQL,
+			row.RewrittenTargetJQL,
+			row.Status,
+			row.Message,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"filter-update-results.post-migration.csv",
+		[]string{"Source Filter ID", "Source Filter Name", "Target Filter ID", "Target Filter Name", "Current Target JQL", "Rewritten Target JQL", "Status", "Message"},
+		records,
+	)
+}
+
+func postMigrationFilterTeamRows(rows []FilterTeamClauseRow, mappings []TeamMapping) [][]string {
+	targetTeamIDs := teamTargetIDsBySourceID(mappings)
+	out := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		if row.MatchType != "team_id" {
+			continue
+		}
+		out = append(out, []string{
+			row.FilterID,
+			row.FilterName,
+			row.Owner,
+			row.MatchType,
+			row.ClauseValue,
+			row.SourceTeamID,
+			row.SourceTeamName,
+			row.Clause,
+			row.JQL,
+			strings.TrimSpace(targetTeamIDs[strings.TrimSpace(row.SourceTeamID)]),
+		})
+	}
+	return out
+}
+
+func teamTargetIDsBySourceID(mappings []TeamMapping) map[string]string {
+	bySource := map[string]string{}
+	for _, mapping := range mappings {
+		sourceID := strconv.FormatInt(mapping.SourceTeamID, 10)
+		targetID := strings.TrimSpace(mapping.TargetTeamID)
+		if sourceID == "" || targetID == "" {
+			continue
+		}
+		bySource[sourceID] = targetID
+	}
+	return bySource
+}
+
+func mappedTargetTeamIDsForExport(raw string, targetTeamIDs map[string]string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';'
+	})
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		sourceID := strings.TrimSpace(part)
+		targetID := strings.TrimSpace(targetTeamIDs[sourceID])
+		if targetID == "" {
+			continue
+		}
+		if _, ok := seen[targetID]; ok {
+			continue
+		}
+		seen[targetID] = struct{}{}
+		out = append(out, targetID)
+	}
+	return out
 }
 
 func loadTeams(baseURL, username, password, file string, progress func(current, total int)) ([]TeamDTO, error) {
@@ -1311,7 +3354,7 @@ func parseInt64List(value string) []int64 {
 	if strings.TrimSpace(value) == "" {
 		return nil
 	}
-	parts := strings.Split(value, ",")
+	parts := splitDelimitedValues(value)
 	out := make([]int64, 0, len(parts))
 	for _, part := range parts {
 		id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
@@ -1320,6 +3363,57 @@ func parseInt64List(value string) []int64 {
 		}
 	}
 	return out
+}
+
+func splitDelimitedValues(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func toSet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		out[trimmed] = struct{}{}
+	}
+	return out
+}
+
+func setEquals(left, right map[string]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key := range left {
+		if _, ok := right[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func nonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func teamScopeSkipReason(scope string, shareable bool) string {
@@ -1429,12 +3523,23 @@ func enrichIssuesCSV(cfg Config, mappings []TeamMapping, teams []TeamDTO) (strin
 func migrationMetadata(state migrationState) map[string]any {
 	metadata := map[string]any{
 		"imd": map[string]any{
-			"programs":  state.ProgramMappings,
-			"plans":     state.PlanMappings,
-			"teams":     state.TeamMappings,
-			"resources": state.ResourcePlans,
-			"issues":    state.IssueTeamRows,
-			"filters":   state.FilterTeamClauseRows,
+			"programs":              state.ProgramMappings,
+			"plans":                 state.PlanMappings,
+			"teams":                 state.TeamMappings,
+			"resources":             state.ResourcePlans,
+			"issues":                state.IssueTeamRows,
+			"parentLinks":           state.ParentLinkRows,
+			"filters":               state.FilterTeamClauseRows,
+			"targetIssues":          state.TargetIssueSnapshots,
+			"issueComparisons":      state.IssueComparisons,
+			"issueResults":          state.IssueUpdateResults,
+			"targetParentLinks":     state.TargetParentLinkSnapshots,
+			"parentLinkComparisons": state.ParentLinkComparisons,
+			"parentLinkResults":     state.ParentLinkUpdateResults,
+			"targetFilters":         state.TargetFilterSnapshots,
+			"filterMatches":         state.FilterTargetMatches,
+			"filterComparisons":     state.FilterComparisons,
+			"filterResults":         state.FilterUpdateResults,
 		},
 		"counts": map[string]int{
 			"sourcePrograms":  len(state.SourcePrograms),
@@ -1594,6 +3699,15 @@ func artifactPathByKey(artifacts []Artifact, key string) string {
 		}
 	}
 	return ""
+}
+
+func findArtifactByKey(artifacts []Artifact, key string) (Artifact, bool) {
+	for _, artifact := range artifacts {
+		if artifact.Key == key {
+			return artifact, true
+		}
+	}
+	return Artifact{}, false
 }
 
 func replaceArtifact(artifacts []Artifact, replacement Artifact) []Artifact {
@@ -1914,7 +4028,7 @@ func exportIssuesWithTeamsField(cfg Config, client *jiraClient, sourceTeams []Te
 		return nil, nil, "", "", findings
 	}
 
-	jql := fmt.Sprintf(`"%s" is not EMPTY`, selection.Field.Name)
+	jql := scopedIssueJQL(cfg.IssueProjectScope, fmt.Sprintf(`"%s" is not EMPTY`, selection.Field.Name))
 	issues, err := client.SearchIssues(jql, []string{"summary", "project", "projectType", selection.Field.ID}, func(current, total int) {
 		if progress != nil {
 			progress.UpdateCount(current, total)
@@ -1942,6 +4056,45 @@ func exportIssuesWithTeamsField(cfg Config, client *jiraClient, sourceTeams []Te
 		newFinding(SeverityInfo, "teams_field_issue_import_exported", fmt.Sprintf("Exported %d issues with a value for %s to import-ready CSV %s", len(rows), selection.Field.Name, importPath)),
 	)
 	return selection, rows, detailedPath, importPath, findings
+}
+
+func exportIssuesWithParentLink(cfg Config, client *jiraClient, progress *progressTracker) (JiraField, []ParentLinkRow, string, []Finding) {
+	fields, err := client.ListFields()
+	if err != nil {
+		return JiraField{}, nil, "", []Finding{newFinding(SeverityWarning, "parent_link_field_discovery_failed", fmt.Sprintf("Could not load Jira fields: %v", err))}
+	}
+
+	field, findings := selectParentLinkField(fields)
+	if field == nil {
+		return JiraField{}, nil, "", findings
+	}
+
+	jql := scopedIssueJQL(cfg.IssueProjectScope, fmt.Sprintf(`type = Epic AND "%s" is not EMPTY`, field.Name))
+	issues, err := client.SearchIssues(jql, []string{"summary", "project", "projectType", field.ID}, func(current, total int) {
+		if progress != nil {
+			progress.UpdateCount(current, total)
+		}
+	})
+	if err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "parent_link_issue_search_failed", fmt.Sprintf("Could not search issues for parent link field %s: %v", field.ID, err)))
+		return *field, nil, "", findings
+	}
+
+	rows, rowFindings := buildParentLinkRows(client, issues, *field)
+	findings = append(findings, rowFindings...)
+	if len(rows) == 0 {
+		findings = append(findings, newFinding(SeverityInfo, "parent_link_no_issues", fmt.Sprintf("No issues found with a value for %s", field.Name)))
+		return *field, rows, "", findings
+	}
+
+	exportPath, err := writeParentLinkExport(cfg, rows)
+	if err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "parent_link_export_failed", err.Error()))
+		return *field, rows, "", findings
+	}
+
+	findings = append(findings, newFinding(SeverityInfo, "parent_link_exported", fmt.Sprintf("Exported %d issues with a value for %s to %s", len(rows), field.Name, exportPath)))
+	return *field, rows, exportPath, findings
 }
 
 func selectTeamsField(fields []JiraField) (*TeamsFieldSelection, []Finding) {
@@ -1976,6 +4129,29 @@ func selectTeamsField(fields []JiraField) (*TeamsFieldSelection, []Finding) {
 		findings = append(findings, newFinding(SeverityInfo, "teams_field_multiple_candidates", fmt.Sprintf("Multiple Teams-like issue fields found; selected %s (%s)", selected.Name, selected.ID)))
 	}
 	return selection, findings
+}
+
+func selectParentLinkField(fields []JiraField) (*JiraField, []Finding) {
+	candidates := make([]JiraField, 0)
+	for _, field := range fields {
+		if looksLikeParentLinkField(field) {
+			candidates = append(candidates, field)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, []Finding{newFinding(SeverityWarning, "parent_link_field_missing", "Could not find a Jira issue field that looks like the Parent Link field")}
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return scoreParentLinkFieldCandidate(candidates[i]) > scoreParentLinkFieldCandidate(candidates[j])
+	})
+
+	selected := candidates[0]
+	var findings []Finding
+	if len(candidates) > 1 {
+		findings = append(findings, newFinding(SeverityInfo, "parent_link_multiple_candidates", fmt.Sprintf("Multiple Parent Link-like issue fields found; selected %s (%s)", selected.Name, selected.ID)))
+	}
+	return &selected, findings
 }
 
 func looksLikeTeamsField(field JiraField) bool {
@@ -2022,6 +4198,47 @@ func scoreTeamsFieldCandidate(field JiraField) int {
 	return score
 }
 
+func looksLikeParentLinkField(field JiraField) bool {
+	name := strings.ToLower(strings.TrimSpace(field.Name))
+	if field.ID == "" || !field.Custom {
+		return false
+	}
+	if field.Schema != nil {
+		custom := strings.ToLower(field.Schema.Custom)
+		if strings.Contains(custom, "parent") && (strings.Contains(custom, "portfolio") || strings.Contains(custom, "plans")) {
+			return true
+		}
+		if strings.Contains(custom, "parentlink") || strings.Contains(custom, "parent-link") {
+			return true
+		}
+	}
+	return name == "parent link" || strings.Contains(name, "parent link")
+}
+
+func scoreParentLinkFieldCandidate(field JiraField) int {
+	score := 0
+	name := strings.ToLower(strings.TrimSpace(field.Name))
+	if name == "parent link" {
+		score += 100
+	}
+	if strings.Contains(name, "parent link") {
+		score += 40
+	}
+	if field.Schema != nil {
+		custom := strings.ToLower(field.Schema.Custom)
+		if strings.Contains(custom, "portfolio") && strings.Contains(custom, "parent") {
+			score += 80
+		}
+		if strings.Contains(custom, "plans") && strings.Contains(custom, "parent") {
+			score += 70
+		}
+		if strings.Contains(custom, "parentlink") || strings.Contains(custom, "parent-link") {
+			score += 60
+		}
+	}
+	return score
+}
+
 func buildIssueTeamRows(issues []JiraIssue, field JiraField, sourceTeams []TeamDTO) []IssueTeamRow {
 	sourceTeamNames := map[string]string{}
 	for _, team := range sourceTeams {
@@ -2060,6 +4277,58 @@ func buildIssueTeamRows(issues []JiraIssue, field JiraField, sourceTeams []TeamD
 	return rows
 }
 
+func buildParentLinkRows(client *jiraClient, issues []JiraIssue, field JiraField) ([]ParentLinkRow, []Finding) {
+	rows := make([]ParentLinkRow, 0, len(issues))
+	findings := make([]Finding, 0)
+	parentCache := map[string]JiraIssue{}
+
+	for _, issue := range issues {
+		ref := extractParentIssueReference(issue.Fields[field.ID])
+		if ref.idOrKey == "" && ref.key == "" {
+			continue
+		}
+
+		parentLookupKey := nonEmptyString(ref.key, ref.idOrKey)
+		parentIssue, ok := parentCache[parentLookupKey]
+		if !ok {
+			fetched, err := client.GetIssue(parentLookupKey, []string{"summary", "project"})
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "parent_link_parent_issue_fetch_failed", fmt.Sprintf("Could not fetch parent issue %s for child %s: %v", parentLookupKey, issue.Key, err)))
+				continue
+			}
+			parentIssue = *fetched
+			parentCache[parentLookupKey] = parentIssue
+		}
+
+		projectKey, projectName, projectType := issueProjectDetails(issue.Fields)
+		parentProjectKey, _, _ := issueProjectDetails(parentIssue.Fields)
+		summary := ""
+		if rawSummary, ok := issue.Fields["summary"].(string); ok {
+			summary = rawSummary
+		}
+		parentSummary := ""
+		if rawSummary, ok := parentIssue.Fields["summary"].(string); ok {
+			parentSummary = rawSummary
+		}
+
+		rows = append(rows, ParentLinkRow{
+			IssueKey:               issue.Key,
+			IssueID:                issue.ID,
+			ProjectKey:             projectKey,
+			ProjectName:            projectName,
+			ProjectType:            projectType,
+			Summary:                summary,
+			ParentLinkFieldID:      field.ID,
+			SourceParentIssueID:    nonEmptyString(ref.idOrKey, parentIssue.ID),
+			SourceParentIssueKey:   nonEmptyString(ref.key, parentIssue.Key),
+			SourceParentSummary:    parentSummary,
+			SourceParentProjectKey: parentProjectKey,
+		})
+	}
+
+	return rows, findings
+}
+
 func issueProjectDetails(fields map[string]any) (string, string, string) {
 	projectKey := ""
 	projectName := ""
@@ -2088,6 +4357,79 @@ func issueProjectDetails(fields map[string]any) (string, string, string) {
 	}
 
 	return projectKey, projectName, projectType
+}
+
+type parentIssueReference struct {
+	idOrKey string
+	key     string
+}
+
+func extractParentIssueReference(raw any) parentIssueReference {
+	ref := parentIssueReference{}
+	var walk func(any)
+	walk = func(value any) {
+		switch v := value.(type) {
+		case string:
+			trimmed := strings.TrimSpace(v)
+			if trimmed == "" {
+				return
+			}
+			if ref.idOrKey == "" {
+				ref.idOrKey = trimmed
+			}
+			if ref.key == "" && !strings.Contains(trimmed, " ") && strings.Contains(trimmed, "-") {
+				ref.key = trimmed
+			}
+		case float64:
+			if ref.idOrKey == "" {
+				ref.idOrKey = strconv.FormatInt(int64(v), 10)
+			}
+		case map[string]any:
+			if nested, ok := v["key"]; ok && ref.key == "" {
+				switch n := nested.(type) {
+				case string:
+					ref.key = strings.TrimSpace(n)
+				}
+			}
+			for _, key := range []string{"id", "issueId", "value"} {
+				if nested, ok := v[key]; ok && ref.idOrKey == "" {
+					switch n := nested.(type) {
+					case string:
+						ref.idOrKey = strings.TrimSpace(n)
+					case float64:
+						ref.idOrKey = strconv.FormatInt(int64(n), 10)
+					}
+				}
+			}
+			for _, nested := range v {
+				if ref.idOrKey != "" && ref.key != "" {
+					break
+				}
+				walk(nested)
+			}
+		case []any:
+			for _, nested := range v {
+				if ref.idOrKey != "" && ref.key != "" {
+					break
+				}
+				walk(nested)
+			}
+		}
+	}
+	walk(raw)
+	return ref
+}
+
+func scopedIssueJQL(scope, clause string) string {
+	projects, err := normalizeIssueProjectScope(scope)
+	if err != nil || len(projects) == 0 {
+		return clause
+	}
+	quoted := make([]string, 0, len(projects))
+	for _, project := range projects {
+		quoted = append(quoted, strconv.Quote(project))
+	}
+	return fmt.Sprintf("project in (%s) AND (%s)", strings.Join(quoted, ","), clause)
 }
 
 func extractTeamFieldIDs(raw any) []string {
@@ -2149,6 +4491,34 @@ func writeIssueTeamExports(cfg Config, rows []IssueTeamRow) (string, string, err
 	}
 
 	return detailedPath, importPath, nil
+}
+
+func writeParentLinkExport(cfg Config, rows []ParentLinkRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.IssueKey,
+			row.IssueID,
+			row.ProjectKey,
+			row.ProjectName,
+			row.ProjectType,
+			row.Summary,
+			row.ParentLinkFieldID,
+			row.SourceParentIssueID,
+			row.SourceParentIssueKey,
+			row.SourceParentSummary,
+			row.SourceParentProjectKey,
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"issues-with-parent-link.pre-migration.csv",
+		[]string{"Issue Key", "Issue ID", "Project Key", "Project Name", "Project Type", "Summary", "Parent Link Field ID", "Source Parent Issue ID", "Source Parent Issue Key", "Source Parent Summary", "Source Parent Project Key"},
+		records,
+	)
 }
 
 func detailedIssueTeamRows(rows []IssueTeamRow) [][]string {

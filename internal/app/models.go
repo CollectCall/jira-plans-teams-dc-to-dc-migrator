@@ -188,6 +188,20 @@ type IssueTeamRow struct {
 	SourceTeamNames string `json:"sourceTeamNames"`
 }
 
+type ParentLinkRow struct {
+	IssueKey               string `json:"issueKey"`
+	IssueID                string `json:"issueId,omitempty"`
+	ProjectKey             string `json:"projectKey,omitempty"`
+	ProjectName            string `json:"projectName,omitempty"`
+	ProjectType            string `json:"projectType,omitempty"`
+	Summary                string `json:"summary,omitempty"`
+	ParentLinkFieldID      string `json:"parentLinkFieldId"`
+	SourceParentIssueID    string `json:"sourceParentIssueId,omitempty"`
+	SourceParentIssueKey   string `json:"sourceParentIssueKey,omitempty"`
+	SourceParentSummary    string `json:"sourceParentSummary,omitempty"`
+	SourceParentProjectKey string `json:"sourceParentProjectKey,omitempty"`
+}
+
 type FilterTeamClauseRow struct {
 	FilterID       string `json:"filterId"`
 	FilterName     string `json:"filterName"`
@@ -198,4 +212,134 @@ type FilterTeamClauseRow struct {
 	SourceTeamName string `json:"sourceTeamName,omitempty"`
 	Clause         string `json:"clause"`
 	JQL            string `json:"jql"`
+}
+
+type TargetFilterSnapshotRow struct {
+	TargetFilterID   string `json:"targetFilterId"`
+	TargetFilterName string `json:"targetFilterName"`
+	TargetOwner      string `json:"targetOwner,omitempty"`
+	Description      string `json:"description,omitempty"`
+	JQL              string `json:"jql,omitempty"`
+	ViewURL          string `json:"viewUrl,omitempty"`
+	SearchURL        string `json:"searchUrl,omitempty"`
+}
+
+type TargetIssueSnapshotRow struct {
+	IssueKey             string `json:"issueKey"`
+	ProjectKey           string `json:"projectKey,omitempty"`
+	ProjectName          string `json:"projectName,omitempty"`
+	ProjectType          string `json:"projectType,omitempty"`
+	Summary              string `json:"summary,omitempty"`
+	TargetTeamsFieldID   string `json:"targetTeamsFieldId,omitempty"`
+	CurrentTargetTeamIDs string `json:"currentTargetTeamIds,omitempty"`
+}
+
+type TargetParentLinkSnapshotRow struct {
+	IssueKey                string `json:"issueKey"`
+	IssueID                 string `json:"issueId,omitempty"`
+	ProjectKey              string `json:"projectKey,omitempty"`
+	ProjectName             string `json:"projectName,omitempty"`
+	ProjectType             string `json:"projectType,omitempty"`
+	Summary                 string `json:"summary,omitempty"`
+	TargetParentLinkFieldID string `json:"targetParentLinkFieldId,omitempty"`
+	CurrentParentIssueID    string `json:"currentParentIssueId,omitempty"`
+	CurrentParentIssueKey   string `json:"currentParentIssueKey,omitempty"`
+}
+
+type PostMigrationIssueComparisonRow struct {
+	IssueKey             string `json:"issueKey"`
+	ProjectKey           string `json:"projectKey,omitempty"`
+	ProjectName          string `json:"projectName,omitempty"`
+	ProjectType          string `json:"projectType,omitempty"`
+	Summary              string `json:"summary,omitempty"`
+	SourceTeamsFieldID   string `json:"sourceTeamsFieldId,omitempty"`
+	TargetTeamsFieldID   string `json:"targetTeamsFieldId,omitempty"`
+	SourceTeamIDs        string `json:"sourceTeamIds,omitempty"`
+	SourceTeamNames      string `json:"sourceTeamNames,omitempty"`
+	TargetTeamIDs        string `json:"targetTeamIds,omitempty"`
+	CurrentTargetTeamIDs string `json:"currentTargetTeamIds,omitempty"`
+	Status               string `json:"status"`
+	Reason               string `json:"reason,omitempty"`
+}
+
+type PostMigrationIssueResultRow struct {
+	IssueKey             string `json:"issueKey"`
+	SourceTeamsFieldID   string `json:"sourceTeamsFieldId,omitempty"`
+	TargetTeamsFieldID   string `json:"targetTeamsFieldId,omitempty"`
+	SourceTeamIDs        string `json:"sourceTeamIds,omitempty"`
+	TargetTeamIDs        string `json:"targetTeamIds,omitempty"`
+	CurrentTargetTeamIDs string `json:"currentTargetTeamIds,omitempty"`
+	Status               string `json:"status"`
+	Message              string `json:"message,omitempty"`
+}
+
+type PostMigrationParentLinkComparisonRow struct {
+	IssueKey                string `json:"issueKey"`
+	IssueID                 string `json:"issueId,omitempty"`
+	ProjectKey              string `json:"projectKey,omitempty"`
+	ProjectName             string `json:"projectName,omitempty"`
+	ProjectType             string `json:"projectType,omitempty"`
+	Summary                 string `json:"summary,omitempty"`
+	SourceParentLinkFieldID string `json:"sourceParentLinkFieldId,omitempty"`
+	TargetParentLinkFieldID string `json:"targetParentLinkFieldId,omitempty"`
+	SourceParentIssueID     string `json:"sourceParentIssueId,omitempty"`
+	SourceParentIssueKey    string `json:"sourceParentIssueKey,omitempty"`
+	TargetParentIssueID     string `json:"targetParentIssueId,omitempty"`
+	TargetParentIssueKey    string `json:"targetParentIssueKey,omitempty"`
+	CurrentParentIssueID    string `json:"currentParentIssueId,omitempty"`
+	CurrentParentIssueKey   string `json:"currentParentIssueKey,omitempty"`
+	Status                  string `json:"status"`
+	Reason                  string `json:"reason,omitempty"`
+}
+
+type PostMigrationParentLinkResultRow struct {
+	IssueKey                string `json:"issueKey"`
+	SourceParentLinkFieldID string `json:"sourceParentLinkFieldId,omitempty"`
+	TargetParentLinkFieldID string `json:"targetParentLinkFieldId,omitempty"`
+	SourceParentIssueID     string `json:"sourceParentIssueId,omitempty"`
+	SourceParentIssueKey    string `json:"sourceParentIssueKey,omitempty"`
+	TargetParentIssueID     string `json:"targetParentIssueId,omitempty"`
+	TargetParentIssueKey    string `json:"targetParentIssueKey,omitempty"`
+	CurrentParentIssueID    string `json:"currentParentIssueId,omitempty"`
+	CurrentParentIssueKey   string `json:"currentParentIssueKey,omitempty"`
+	Status                  string `json:"status"`
+	Message                 string `json:"message,omitempty"`
+}
+
+type PostMigrationFilterMatchRow struct {
+	SourceFilterID   string `json:"sourceFilterId"`
+	SourceFilterName string `json:"sourceFilterName"`
+	SourceOwner      string `json:"sourceOwner,omitempty"`
+	TargetFilterID   string `json:"targetFilterId,omitempty"`
+	TargetFilterName string `json:"targetFilterName,omitempty"`
+	TargetOwner      string `json:"targetOwner,omitempty"`
+	Status           string `json:"status"`
+	Reason           string `json:"reason,omitempty"`
+}
+
+type PostMigrationFilterComparisonRow struct {
+	SourceFilterID     string `json:"sourceFilterId"`
+	SourceFilterName   string `json:"sourceFilterName"`
+	SourceOwner        string `json:"sourceOwner,omitempty"`
+	SourceClause       string `json:"sourceClause,omitempty"`
+	SourceTeamID       string `json:"sourceTeamId,omitempty"`
+	TargetFilterID     string `json:"targetFilterId,omitempty"`
+	TargetFilterName   string `json:"targetFilterName,omitempty"`
+	TargetOwner        string `json:"targetOwner,omitempty"`
+	TargetTeamID       string `json:"targetTeamId,omitempty"`
+	CurrentTargetJQL   string `json:"currentTargetJql,omitempty"`
+	RewrittenTargetJQL string `json:"rewrittenTargetJql,omitempty"`
+	Status             string `json:"status"`
+	Reason             string `json:"reason,omitempty"`
+}
+
+type PostMigrationFilterResultRow struct {
+	SourceFilterID     string `json:"sourceFilterId,omitempty"`
+	SourceFilterName   string `json:"sourceFilterName,omitempty"`
+	TargetFilterID     string `json:"targetFilterId,omitempty"`
+	TargetFilterName   string `json:"targetFilterName,omitempty"`
+	CurrentTargetJQL   string `json:"currentTargetJql,omitempty"`
+	RewrittenTargetJQL string `json:"rewrittenTargetJql,omitempty"`
+	Status             string `json:"status"`
+	Message            string `json:"message,omitempty"`
 }

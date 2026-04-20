@@ -52,8 +52,10 @@ type InputFiles struct {
 	IssuesCSV            string `json:"issuesCsv,omitempty"`
 	FilterSourceCSV      string `json:"filterSourceCsv,omitempty"`
 	TeamScope            string `json:"teamScope,omitempty"`
+	IssueProjectScope    string `json:"issueProjectScope,omitempty"`
 	ScanFilters          bool   `json:"scanFilters,omitempty"`
 	FilterTeamIDsInScope bool   `json:"filterTeamIDsInScope,omitempty"`
+	ParentLinkInScope    bool   `json:"parentLinkInScope,omitempty"`
 	FilterDataSource     string `json:"filterDataSource,omitempty"`
 }
 

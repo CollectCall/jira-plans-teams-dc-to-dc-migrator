@@ -33,7 +33,13 @@ type teamFilterScriptRunnerResponse struct {
 		Owner string `json:"owner"`
 		JQL   string `json:"jql"`
 	} `json:"results"`
-	ParseErrors []any `json:"parseErrors"`
+	ParseErrors []teamFilterParseError `json:"parseErrors"`
+}
+
+type teamFilterParseError struct {
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Error string `json:"error"`
 }
 
 var teamEqualsClausePattern = regexp.MustCompile(`(?i)(?:"?team"?|\bteam\b)\s*=\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.:-]+))`)

@@ -65,7 +65,17 @@ teams-migrator migrate --profile default --apply
 
 The CLI is interactive by default when run in a terminal. If required inputs or secrets are missing, it prompts for them.
 During interactive `plan` and `migrate` runs it also asks whether filters should be scanned; the default is `no`.
-During `init` it also asks whether team-ID-based filter rewrites are in scope, and if they are, whether the environment will use ScriptRunner or a DB-derived CSV for authoritative pre-migrate filter inventory.
+During `init` it also asks whether team-ID-based filter rewrites are in scope, and if they are, whether the source filter inventory is from ScriptRunner or a DB-derived CSV.
+
+### Filter prerequisites (team-ID rewrite scope)
+
+To use ScriptRunner for filters, install and publish the endpoint scripts in your Jira ScriptRunner app:
+- `scripts/sourceFindTeamFiltersDB.groovy` → `/rest/scriptrunner/latest/custom/findTeamFiltersDB`
+- `scripts/targetFindTeamFiltersDB.groovy` → `/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB`
+
+The ScriptRunner endpoints require Jira admin permission and basic auth; `init` verifies them during setup when source/base URL is available.
+
+If ScriptRunner is not available, use `--filter-source-csv` with a CSV containing `Filter ID`, `Filter Name`, `Owner`, and `JQL` (DB-derived).
 
 To update an installed binary to the latest published release:
 
@@ -110,6 +120,18 @@ teams-migrator migrate \
   --apply
 ```
 
+### Init and migrate arguments for filter flow (compact)
+
+`init`
+- interactive by default; answer the filter scope prompts to save how filters are resolved
+- no dedicated filter flags are required during `init` other than normal profile/Jira inputs
+
+`migrate`
+- `--filter-source-csv <path>`: required when using DB-derived CSV (instead of ScriptRunner)
+- `--scan-filters`: best-effort visible-filter scan during migrate/reporting flow
+- `--phase pre-migrate|migrate|post-migrate`: run only the selected phase
+- `--apply`: perform updates (otherwise dry-run)
+
 ### Filter scan POC
 ```bash
 teams-migrator scan-filters \
@@ -119,9 +141,7 @@ teams-migrator scan-filters \
   --teams-file ./teams.json
 ```
 
-The filter scan currently performs a proof-of-concept inventory pass against Jira's filter REST API and exports filters whose JQL contains a `Team = ...` clause matching a known source team ID or team name.
-It only scans filters visible to the authenticated user, so production coverage depends on the permissions of the account used for the scan and should not be treated as the authoritative source for post-migrate team-ID filter rewrites.
-For full coverage, prefer the ScriptRunner custom endpoint in `scripts/scriptrunnerGetFiltersWithTeamFieldEndpoint.groovy` or a CSV generated from a database query.
-If you use the DB CSV path, the tool expects columns like `Filter ID`, `Filter Name`, `Owner`, and `JQL`; you can pass that file on a run with `--filter-source-csv`.
+The filter scan performs a best-effort REST inventory pass for visible `Team = ...` clauses and is not authoritative.
+For full coverage, use the ScriptRunner scripts above or a DB-derived CSV (`--filter-source-csv`) that includes `Filter ID`, `Filter Name`, `Owner`, and `JQL`.
 
 The CLI uses basic auth for Jira API access. When credentials are not supplied through flags or environment variables, it prompts for them at runtime and does not store them in the profile.

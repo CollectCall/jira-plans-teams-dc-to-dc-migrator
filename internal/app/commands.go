@@ -34,7 +34,11 @@ func runMigrate(cfg Config) Report {
 	case phasePreMigrate:
 		report.Findings = append(report.Findings, newFinding(SeverityInfo, "pre_migrate_phase_complete", "Pre-migrate phase completed; no remote writes were sent"))
 	case phasePostMigrate:
-		report.Findings = append(report.Findings, newFinding(SeverityInfo, "post_migrate_phase_preview", "Post-migrate phase preview generated; apply mode is not implemented yet"))
+		if !cfg.DryRun {
+			report.Findings = append(report.Findings, newFinding(SeverityInfo, "post_migrate_phase_complete", "Post-migrate corrections were applied where the current target state still matched the prepared rewrites"))
+		} else {
+			report.Findings = append(report.Findings, newFinding(SeverityInfo, "post_migrate_phase_preview", "Post-migrate phase preview generated; rerun with --apply to execute the prepared corrections"))
+		}
 	case phaseMigrate:
 		if !cfg.DryRun {
 			report.Findings = append(report.Findings, newFinding(SeverityInfo, "apply_mode_active", "Apply mode executed remote write operations where mappings were resolvable"))
@@ -48,7 +52,7 @@ func runMigrate(cfg Config) Report {
 			report.Findings = append(report.Findings, newFinding(SeverityInfo, "dry_run_default", "Dry-run is active; no remote writes were sent"))
 		}
 	}
-	if !runsMigratePhase(cfg.Command, cfg.Phase) && !cfg.DryRun {
+	if !runsMigratePhase(cfg.Command, cfg.Phase) && !runsPostMigratePhase(cfg.Command, cfg.Phase) && !cfg.DryRun {
 		report.Findings = append(report.Findings, newFinding(SeverityError, "phase_apply_unsupported", fmt.Sprintf("%s does not support apply mode", normalizeMigrationPhase(cfg.Phase))))
 	}
 	finalizeReport(&report)
@@ -112,8 +116,10 @@ func newReport(cfg Config) Report {
 			IssuesCSV:            cfg.IssuesCSV,
 			FilterSourceCSV:      cfg.FilterSourceCSV,
 			TeamScope:            cfg.TeamScope,
+			IssueProjectScope:    cfg.IssueProjectScope,
 			ScanFilters:          cfg.ScanFilters,
 			FilterTeamIDsInScope: cfg.FilterTeamIDsInScope,
+			ParentLinkInScope:    cfg.ParentLinkInScope,
 			FilterDataSource:     cfg.FilterDataSource,
 		},
 		ExitBehavior: ExitBehavior{
@@ -148,6 +154,21 @@ func populateExecutionReport(report Report, state migrationState, findings []Fin
 	if infoCode != "" && infoMessage != "" {
 		report.Findings = append(report.Findings, newFinding(SeverityInfo, infoCode, infoMessage))
 	}
+	finalizeReport(&report)
+	return report
+}
+
+func buildPostMigrationFollowUpPreviewReport(cfg Config, state migrationState) Report {
+	postCfg := cfg
+	postCfg.Phase = phasePostMigrate
+	postCfg.DryRun = true
+
+	report := newReport(postCfg)
+	report.Metadata = migrationMetadata(state)
+	report.Findings = append(report.Findings,
+		newFinding(SeverityInfo, "post_migrate_followup_preview", "Post-migrate preview generated from the prepared correction mapping files"),
+		newFinding(SeverityInfo, "post_migrate_phase_preview", "Post-migrate phase preview generated; rerun with --apply to execute the prepared corrections"),
+	)
 	finalizeReport(&report)
 	return report
 }

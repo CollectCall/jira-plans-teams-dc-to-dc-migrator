@@ -1,6 +1,7 @@
 import com.onresolve.scriptrunner.runner.rest.common.CustomEndpointDelegate
 import groovy.json.JsonBuilder
 import groovy.transform.BaseScript
+import groovy.transform.Field
 
 import javax.ws.rs.core.MultivaluedMap
 import javax.ws.rs.core.Response
@@ -17,15 +18,21 @@ import org.ofbiz.core.entity.DelegatorInterface
 
 @BaseScript CustomEndpointDelegate delegate
 
+@Field static String DB_PRODUCT = null
+
 
 findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, HttpServletRequest request ->
 
+    def startTime = System.currentTimeMillis()
+
     // =========================
-    // 🔒 AUTH
+    // AUTH
     // =========================
     def authHeader = request.getHeader("Authorization")
     if (!authHeader?.startsWith("Basic ")) {
-        return Response.status(401).header("WWW-Authenticate", "Basic realm=\"Jira\"").build()
+        return Response.status(401)
+            .header("WWW-Authenticate", "Basic realm=\"Jira\"")
+            .build()
     }
 
     def username
@@ -59,7 +66,7 @@ findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, 
     }
 
     // =========================
-    // ⚙️ PARAMS
+    // PARAMS
     // =========================
     long lastId
     int limit
@@ -83,7 +90,7 @@ findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, 
     def expectedField = "cf[" + teamFieldId + "]"
 
     // =========================
-    // ⚙️ SETUP
+    // SETUP
     // =========================
     def jqlParser = ComponentAccessor.getComponent(JqlQueryParser)
     def searchRequestManager = ComponentAccessor.getComponent(SearchRequestManager)
@@ -94,14 +101,15 @@ findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, 
     def lastScannedId = lastId
 
     // =========================
-    // DB DETECTION
+    // DB DETECTION (cached)
     // =========================
-    def dbProduct = "unknown"
-    DatabaseUtil.withSql('local') { sql ->
-        dbProduct = sql.connection.metaData.databaseProductName.toLowerCase()
+    if (DB_PRODUCT == null) {
+        DatabaseUtil.withSql('local') { sql ->
+            DB_PRODUCT = sql.connection.metaData.databaseProductName.toLowerCase()
+        }
     }
 
-    def useSqlLimit = dbProduct.contains("postgres") || dbProduct.contains("mysql")
+    def useSqlLimit = DB_PRODUCT.contains("postgres") || DB_PRODUCT.contains("mysql")
 
     // =========================
     // FAST PATH
@@ -143,6 +151,8 @@ findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, 
         }
     }
 
+    def durationMs = System.currentTimeMillis() - startTime
+
     return Response.ok(new JsonBuilder([
         meta: [
             lastId          : lastId,
@@ -151,7 +161,8 @@ findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, 
             matched         : results.size(),
             parseErrorCount : parseErrors.size(),
             limit           : limit,
-            dbMode          : useSqlLimit ? "sql" : "fallback"
+            dbMode          : useSqlLimit ? "sql" : "fallback",
+            durationMs      : durationMs
         ],
         results: results,
         parseErrors: parseErrors
@@ -192,7 +203,7 @@ def processSingle(id, srm, parser, expectedField, results, parseErrors) {
 
 
 // =========================
-// MATCH LOGIC (FINAL)
+// MATCH LOGIC
 // =========================
 
 boolean containsTeamClause(Clause clause, String expectedField) {
@@ -220,8 +231,8 @@ boolean isTeamClauseMatch(TerminalClause clause, String expectedField) {
     def op = clause.operator?.toString()
 
     def isTeamField =
-        field == "team" ||           // always include ambiguous "Team"
-        field == expectedField       // only include specific cf[id]
+        field == "team" ||
+        field == expectedField
 
     def isSupportedOperator =
         op == "EQUALS" || op == "IN"

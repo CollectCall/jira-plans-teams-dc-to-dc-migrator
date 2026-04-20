@@ -63,6 +63,37 @@ func loadFilterTeamClauseRowsFromExport(path string) ([]FilterTeamClauseRow, err
 	return rows, nil
 }
 
+func loadParentLinkRowsFromExport(path string) ([]ParentLinkRow, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) <= 1 {
+		return nil, nil
+	}
+
+	rows := make([]ParentLinkRow, 0, len(records)-1)
+	for _, record := range records[1:] {
+		if len(record) < 11 {
+			return nil, fmt.Errorf("parent link export row has %d column(s), expected 11", len(record))
+		}
+		rows = append(rows, ParentLinkRow{
+			IssueKey:               record[0],
+			IssueID:                record[1],
+			ProjectKey:             record[2],
+			ProjectName:            record[3],
+			ProjectType:            record[4],
+			Summary:                record[5],
+			ParentLinkFieldID:      record[6],
+			SourceParentIssueID:    record[7],
+			SourceParentIssueKey:   record[8],
+			SourceParentSummary:    record[9],
+			SourceParentProjectKey: record[10],
+		})
+	}
+	return rows, nil
+}
+
 func readCSVRecordsFromFile(path string) ([][]string, error) {
 	file, err := os.Open(path)
 	if err != nil {

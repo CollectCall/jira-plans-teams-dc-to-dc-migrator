@@ -6,31 +6,33 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
 
 const (
-	envSourceBaseURL   = "TEAMS_MIGRATOR_SOURCE_BASE_URL"
-	envSourceUsername  = "TEAMS_MIGRATOR_SOURCE_USERNAME"
-	envSourcePassword  = "TEAMS_MIGRATOR_SOURCE_PASSWORD"
-	envTargetBaseURL   = "TEAMS_MIGRATOR_TARGET_BASE_URL"
-	envTargetUsername  = "TEAMS_MIGRATOR_TARGET_USERNAME"
-	envTargetPassword  = "TEAMS_MIGRATOR_TARGET_PASSWORD"
-	envIdentityMapping = "TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE"
-	envTeamsFile       = "TEAMS_MIGRATOR_TEAMS_FILE"
-	envPersonsFile     = "TEAMS_MIGRATOR_PERSONS_FILE"
-	envResourcesFile   = "TEAMS_MIGRATOR_RESOURCES_FILE"
-	envIssuesCSV       = "TEAMS_MIGRATOR_ISSUES_CSV"
-	envFilterSourceCSV = "TEAMS_MIGRATOR_FILTER_SOURCE_CSV"
-	envOutputDir       = "TEAMS_MIGRATOR_OUTPUT_DIR"
-	envReportFormat    = "TEAMS_MIGRATOR_REPORT_FORMAT"
-	envTeamScope       = "TEAMS_MIGRATOR_TEAM_SCOPE"
-	envScanFilters     = "TEAMS_MIGRATOR_SCAN_FILTERS"
-	envStrict          = "TEAMS_MIGRATOR_STRICT"
-	envDryRun          = "TEAMS_MIGRATOR_DRY_RUN"
-	envReportInput     = "TEAMS_MIGRATOR_REPORT_INPUT"
-	envPhase           = "TEAMS_MIGRATOR_PHASE"
+	envSourceBaseURL     = "TEAMS_MIGRATOR_SOURCE_BASE_URL"
+	envSourceUsername    = "TEAMS_MIGRATOR_SOURCE_USERNAME"
+	envSourcePassword    = "TEAMS_MIGRATOR_SOURCE_PASSWORD"
+	envTargetBaseURL     = "TEAMS_MIGRATOR_TARGET_BASE_URL"
+	envTargetUsername    = "TEAMS_MIGRATOR_TARGET_USERNAME"
+	envTargetPassword    = "TEAMS_MIGRATOR_TARGET_PASSWORD"
+	envIdentityMapping   = "TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE"
+	envTeamsFile         = "TEAMS_MIGRATOR_TEAMS_FILE"
+	envPersonsFile       = "TEAMS_MIGRATOR_PERSONS_FILE"
+	envResourcesFile     = "TEAMS_MIGRATOR_RESOURCES_FILE"
+	envIssuesCSV         = "TEAMS_MIGRATOR_ISSUES_CSV"
+	envFilterSourceCSV   = "TEAMS_MIGRATOR_FILTER_SOURCE_CSV"
+	envOutputDir         = "TEAMS_MIGRATOR_OUTPUT_DIR"
+	envReportFormat      = "TEAMS_MIGRATOR_REPORT_FORMAT"
+	envTeamScope         = "TEAMS_MIGRATOR_TEAM_SCOPE"
+	envIssueProjectScope = "TEAMS_MIGRATOR_ISSUE_PROJECT_SCOPE"
+	envScanFilters       = "TEAMS_MIGRATOR_SCAN_FILTERS"
+	envStrict            = "TEAMS_MIGRATOR_STRICT"
+	envDryRun            = "TEAMS_MIGRATOR_DRY_RUN"
+	envReportInput       = "TEAMS_MIGRATOR_REPORT_INPUT"
+	envPhase             = "TEAMS_MIGRATOR_PHASE"
 )
 
 const (
@@ -57,10 +59,13 @@ type Config struct {
 	ReportInput                 string
 	ReportFormat                ReportFormat
 	TeamScope                   string
+	IssueProjectScope           string
 	ScanFilters                 bool
 	ScanFiltersExplicit         bool
 	FilterTeamIDsInScope        bool
 	FilterTeamIDsInScopeSet     bool
+	ParentLinkInScope           bool
+	ParentLinkInScopeSet        bool
 	FilterDataSource            string
 	FilterScriptRunnerInstalled bool
 	FilterScriptRunnerEndpoint  string
@@ -105,6 +110,7 @@ func parseConfig(args []string) (Config, error) {
 	fs.StringVar(&cfg.Phase, "phase", envValue(envPhase), "Migration phase for migrate: pre-migrate, migrate, or post-migrate")
 	fs.BoolVar(&cfg.Redacted, "redacted", true, "Redact secrets in config show output")
 	fs.StringVar(&cfg.TeamScope, "team-scope", envValue(envTeamScope), "Team migration scope: all, shared-only, or non-shared-only")
+	fs.StringVar(&cfg.IssueProjectScope, "issue-project-scope", envValue(envIssueProjectScope), "Issue correction project scope: all or a comma-separated list of Jira project keys")
 	cfg.ScanFilters = boolEnv(envScanFilters, false)
 	fs.BoolVar(&cfg.ScanFilters, "scan-filters", cfg.ScanFilters, "Scan Jira filters for Team = {id|name} clauses during the run")
 	cfg.ScanFiltersExplicit = envIsSet(envScanFilters) || boolFlagProvided(remaining, "--scan-filters")
@@ -171,6 +177,9 @@ func parseConfig(args []string) (Config, error) {
 	} else {
 		cfg.TeamScope = strings.ToLower(strings.TrimSpace(cfg.TeamScope))
 	}
+	if strings.TrimSpace(cfg.IssueProjectScope) == "" {
+		cfg.IssueProjectScope = "all"
+	}
 	if normalized := normalizeFilterDataSource(cfg.FilterDataSource); normalized != "" {
 		cfg.FilterDataSource = normalized
 	} else {
@@ -178,8 +187,13 @@ func parseConfig(args []string) (Config, error) {
 	}
 
 	if cfg.Command != "init" && cfg.Command != "config show" && cfg.Command != "config path" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" && !cfg.NoInput {
-		if err := completeConfigInteractively(&cfg); err != nil {
-			return Config{}, err
+		if cfg.Command == "migrate" && isInteractiveTerminal() {
+			// The migrate command runs a dedicated multi-phase session in Run so
+			// credentials and prior answers can stay in memory across phases.
+		} else {
+			if err := completeConfigInteractively(&cfg); err != nil {
+				return Config{}, err
+			}
 		}
 	}
 
@@ -232,6 +246,9 @@ func (c Config) validate() error {
 	case "all", "shared-only", "non-shared-only":
 	default:
 		return fmt.Errorf("unsupported team scope %q; use all, shared-only, or non-shared-only", c.TeamScope)
+	}
+	if _, err := normalizeIssueProjectScope(c.IssueProjectScope); err != nil {
+		return err
 	}
 
 	switch c.FilterDataSource {
@@ -317,6 +334,9 @@ func validateMigrationPhaseInputs(c Config) []Finding {
 		if !c.DryRun {
 			return []Finding{newFinding(SeverityError, "pre_migrate_apply_unsupported", "Pre-migrate is a read-only phase; rerun without --apply")}
 		}
+		if c.ParentLinkInScope && strings.TrimSpace(c.SourceBaseURL) == "" {
+			return []Finding{newFinding(SeverityError, "pre_migrate_parent_link_missing_source", "Parent Link corrections are in scope, but no source Jira base URL is available for the pre-migrate export. Configure source Jira API access first.")}
+		}
 		if c.FilterTeamIDsInScope {
 			switch normalizeFilterDataSource(c.FilterDataSource) {
 			case "":
@@ -334,13 +354,40 @@ func validateMigrationPhaseInputs(c Config) []Finding {
 				}
 			}
 		}
-	case phasePostMigrate:
-		if !c.DryRun {
-			return []Finding{newFinding(SeverityError, "post_migrate_apply_unsupported", "Post-migrate apply mode is not implemented yet; rerun without --apply")}
-		}
 	}
 
 	return nil
+}
+
+func normalizeIssueProjectScope(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.EqualFold(trimmed, "all") {
+		return nil, nil
+	}
+	parts := strings.Split(trimmed, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		projectKey := strings.ToUpper(strings.TrimSpace(part))
+		if projectKey == "" {
+			continue
+		}
+		for _, r := range projectKey {
+			if (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+				return nil, fmt.Errorf("unsupported issue project scope %q; use all or a comma-separated list of Jira project keys", raw)
+			}
+		}
+		if _, ok := seen[projectKey]; ok {
+			continue
+		}
+		seen[projectKey] = struct{}{}
+		out = append(out, projectKey)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (c Config) requireFilterScanInputs() []Finding {

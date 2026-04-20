@@ -316,6 +316,9 @@ func summaryPhaseLines(report Report) []string {
 	selectedPhase := reportPhase(report)
 
 	issueRows := issueTeamRowsFromValue(imd["issues"])
+	parentLinkRows := parentLinkRowsFromValue(imd["parentLinks"])
+	parentLinkComparisons := parentLinkComparisonRowsFromValue(imd["parentLinkComparisons"])
+	filterComparisons := filterComparisonRowsFromValue(imd["filterComparisons"])
 	filterRows := filterTeamClauseRowsFromValue(imd["filters"])
 	teamMappings := teamMappingsFromValue(imd["teams"])
 	targetTeamIDs := targetTeamIDsBySource(teamMappings)
@@ -326,6 +329,9 @@ func summaryPhaseLines(report Report) []string {
 	}
 	if len(issueRows) > 0 {
 		preDetails = append(preDetails, fmt.Sprintf("%d issue/team export row(s)", len(issueRows)))
+	}
+	if len(parentLinkRows) > 0 {
+		preDetails = append(preDetails, fmt.Sprintf("%d parent-link export row(s)", len(parentLinkRows)))
 	}
 	if len(filterRows) > 0 {
 		preDetails = append(preDetails, fmt.Sprintf("%d filter team match(es)", len(filterRows)))
@@ -365,10 +371,14 @@ func summaryPhaseLines(report Report) []string {
 			migrateStatus = "blocked"
 		}
 		postStatus = "preview"
+		if report.Command == "migrate" && !report.DryRun {
+			postStatus = "completed"
+		}
 	}
 
 	issueUpdateCount := countMappedIssueUpdates(issueRows, targetTeamIDs)
-	filterUpdateCount := countMappedFilterUpdates(filterRows, targetTeamIDs)
+	parentLinkUpdateCount := countReadyParentLinkUpdates(parentLinkComparisons)
+	filterUpdateCount := countReadyFilterUpdates(filterComparisons)
 
 	lines := []string{
 		fmt.Sprintf("Pre-migrate [%s]: fetch source and destination data and generate comparison docs%s", preStatus, formatPhaseDetails(preDetails)),
@@ -379,8 +389,8 @@ func summaryPhaseLines(report Report) []string {
 		))),
 		fmt.Sprintf("Post-migrate [%s]: update Jira team references%s", postStatus, formatPhaseDetails(nonEmptyDetails(
 			countLabel(issueUpdateCount, "issue ready for team ID rewrite", "issues ready for team ID rewrites"),
+			countLabel(parentLinkUpdateCount, "issue ready for Parent Link rewrite", "issues ready for Parent Link rewrites"),
 			countLabel(filterUpdateCount, "filter ready for team ID rewrite", "filters ready for team ID rewrites"),
-			"parent link update is TODO",
 		))),
 	}
 	return lines
@@ -423,6 +433,7 @@ func preMigratePreviewLines(imd map[string]any) []string {
 	lines = appendPreviewExamples(lines, "Teams", teamPreviewRows(imd["teams"]), 1)
 	lines = appendPreviewExamples(lines, "Memberships", membershipPreviewRows(imd["resources"]), 1)
 	lines = appendPreviewExamples(lines, "Issue export", issuePreviewRows(imd["issues"]), 1)
+	lines = appendPreviewExamples(lines, "Parent Link export", parentLinkPreviewRows(imd["parentLinks"]), 1)
 	lines = appendPreviewExamples(lines, "Filter scan", filterPreviewRows(imd["filters"]), 1)
 	return lines
 }
@@ -452,46 +463,62 @@ func migratePreviewLines(imd map[string]any) []string {
 func postMigratePreviewLines(imd map[string]any) []string {
 	mappings := teamMappingsFromValue(imd["teams"])
 	issueRows := issueTeamRowsFromValue(imd["issues"])
-	filterRows := filterTeamClauseRowsFromValue(imd["filters"])
+	parentLinkComparisons := parentLinkComparisonRowsFromValue(imd["parentLinkComparisons"])
+	filterComparisons := filterComparisonRowsFromValue(imd["filterComparisons"])
 	targetTeamIDs := targetTeamIDsBySource(mappings)
 
 	lines := []string{}
 	issueExamples := 0
 	for _, row := range issueRows {
-		targetIDs := mappedTargetTeamIDs(row.SourceTeamIDs, targetTeamIDs)
-		if len(targetIDs) == 0 {
+		rewritePairs := mappedTargetTeamRewritePairs(row.SourceTeamIDs, targetTeamIDs)
+		if len(rewritePairs) == 0 {
 			continue
 		}
 		label := row.SourceTeamNames
 		if label == "" {
 			label = row.SourceTeamIDs
 		}
-		lines = append(lines, fmt.Sprintf("Issue update: %s [%s] -> %s", row.IssueKey, label, strings.Join(targetIDs, ",")))
+		lines = append(lines, fmt.Sprintf("Issue update: %s [%s] %s", row.IssueKey, label, strings.Join(rewritePairs, "; ")))
 		issueExamples++
 		if issueExamples == 3 {
 			break
 		}
 	}
 
-	filterExamples := 0
-	for _, row := range filterRows {
-		targetID := strings.TrimSpace(targetTeamIDs[row.SourceTeamID])
-		if targetID == "" {
+	parentLinkExamples := 0
+	for _, row := range parentLinkComparisons {
+		if row.Status != "ready" && row.Status != "already_rewritten" {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("Filter update: %s [%s] %s -> Team = %s", row.FilterName, row.FilterID, row.Clause, targetID))
+		if row.TargetParentIssueID == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("Parent link update: %s Parent Link = %s -> Parent Link = %s", row.IssueKey, nonEmptyString(row.SourceParentIssueID, row.SourceParentIssueKey), nonEmptyString(row.TargetParentIssueID, row.TargetParentIssueKey)))
+		parentLinkExamples++
+		if parentLinkExamples == 2 {
+			break
+		}
+	}
+
+	filterExamples := 0
+	for _, row := range filterComparisons {
+		if row.Status != "ready" && row.Status != "already_rewritten" && row.Status != "same_id" {
+			continue
+		}
+		rewrittenClause := row.SourceClause
+		if row.SourceTeamID != "" && row.TargetTeamID != "" {
+			rewrittenClause = strings.Replace(row.SourceClause, row.SourceTeamID, row.TargetTeamID, 1)
+		}
+		lines = append(lines, fmt.Sprintf("Filter update: %s [%s] %s -> %s", row.SourceFilterName, row.SourceFilterID, row.SourceClause, rewrittenClause))
 		filterExamples++
 		if filterExamples == 2 {
 			break
 		}
 	}
 
-	lines = append(lines, "Parent link updates: TODO")
-
-	if len(lines) == 1 && issueExamples == 0 && filterExamples == 0 {
+	if len(lines) == 0 && issueExamples == 0 && parentLinkExamples == 0 && filterExamples == 0 {
 		return []string{
-			"Issue and filter team ID rewrites are not generated yet.",
-			"Parent link updates: TODO",
+			"Issue, Parent Link, and filter rewrites are not generated yet.",
 		}
 	}
 	return lines
@@ -552,6 +579,17 @@ func issuePreviewRows(value any) []string {
 	}
 }
 
+func parentLinkPreviewRows(value any) []string {
+	switch rows := value.(type) {
+	case []ParentLinkRow:
+		return limitLines(formatParentLinkRows(rows))
+	case []any:
+		return limitLines(formatParentLinkRowMaps(rows))
+	default:
+		return nil
+	}
+}
+
 func filterPreviewRows(value any) []string {
 	switch rows := value.(type) {
 	case []FilterTeamClauseRow:
@@ -561,6 +599,29 @@ func filterPreviewRows(value any) []string {
 	default:
 		return nil
 	}
+}
+
+func formatParentLinkRows(rows []ParentLinkRow) []string {
+	lines := []string{}
+	for _, row := range rows {
+		lines = append(lines, fmt.Sprintf("- %s -> %s", row.IssueKey, nonEmptyString(row.SourceParentIssueKey, row.SourceParentIssueID)))
+	}
+	return lines
+}
+
+func formatParentLinkRowMaps(rows []any) []string {
+	lines := []string{}
+	for _, item := range rows {
+		row, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- %s -> %s",
+			asString(row["issueKey"]),
+			nonEmptyString(asString(row["sourceParentIssueKey"]), asString(row["sourceParentIssueId"])),
+		))
+	}
+	return lines
 }
 
 func formatProgramMappings(rows []ProgramMapping) []string {
@@ -842,6 +903,106 @@ func issueTeamRowsFromValue(value any) []IssueTeamRow {
 	}
 }
 
+func parentLinkRowsFromValue(value any) []ParentLinkRow {
+	switch rows := value.(type) {
+	case []ParentLinkRow:
+		return rows
+	case []any:
+		out := make([]ParentLinkRow, 0, len(rows))
+		for _, item := range rows {
+			row, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, ParentLinkRow{
+				IssueKey:               asString(row["issueKey"]),
+				IssueID:                asString(row["issueId"]),
+				ProjectKey:             asString(row["projectKey"]),
+				ProjectName:            asString(row["projectName"]),
+				ProjectType:            asString(row["projectType"]),
+				Summary:                asString(row["summary"]),
+				ParentLinkFieldID:      asString(row["parentLinkFieldId"]),
+				SourceParentIssueID:    asString(row["sourceParentIssueId"]),
+				SourceParentIssueKey:   asString(row["sourceParentIssueKey"]),
+				SourceParentSummary:    asString(row["sourceParentSummary"]),
+				SourceParentProjectKey: asString(row["sourceParentProjectKey"]),
+			})
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func parentLinkComparisonRowsFromValue(value any) []PostMigrationParentLinkComparisonRow {
+	switch rows := value.(type) {
+	case []PostMigrationParentLinkComparisonRow:
+		return rows
+	case []any:
+		out := make([]PostMigrationParentLinkComparisonRow, 0, len(rows))
+		for _, item := range rows {
+			row, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, PostMigrationParentLinkComparisonRow{
+				IssueKey:                asString(row["issueKey"]),
+				IssueID:                 asString(row["issueId"]),
+				ProjectKey:              asString(row["projectKey"]),
+				ProjectName:             asString(row["projectName"]),
+				ProjectType:             asString(row["projectType"]),
+				Summary:                 asString(row["summary"]),
+				SourceParentLinkFieldID: asString(row["sourceParentLinkFieldId"]),
+				TargetParentLinkFieldID: asString(row["targetParentLinkFieldId"]),
+				SourceParentIssueID:     asString(row["sourceParentIssueId"]),
+				SourceParentIssueKey:    asString(row["sourceParentIssueKey"]),
+				TargetParentIssueID:     asString(row["targetParentIssueId"]),
+				TargetParentIssueKey:    asString(row["targetParentIssueKey"]),
+				CurrentParentIssueID:    asString(row["currentParentIssueId"]),
+				CurrentParentIssueKey:   asString(row["currentParentIssueKey"]),
+				Status:                  asString(row["status"]),
+				Reason:                  asString(row["reason"]),
+			})
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func filterComparisonRowsFromValue(value any) []PostMigrationFilterComparisonRow {
+	switch rows := value.(type) {
+	case []PostMigrationFilterComparisonRow:
+		return rows
+	case []any:
+		out := make([]PostMigrationFilterComparisonRow, 0, len(rows))
+		for _, item := range rows {
+			row, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, PostMigrationFilterComparisonRow{
+				SourceFilterID:     asString(row["sourceFilterId"]),
+				SourceFilterName:   asString(row["sourceFilterName"]),
+				SourceOwner:        asString(row["sourceOwner"]),
+				SourceClause:       asString(row["sourceClause"]),
+				SourceTeamID:       asString(row["sourceTeamId"]),
+				TargetFilterID:     asString(row["targetFilterId"]),
+				TargetFilterName:   asString(row["targetFilterName"]),
+				TargetOwner:        asString(row["targetOwner"]),
+				TargetTeamID:       asString(row["targetTeamId"]),
+				CurrentTargetJQL:   asString(row["currentTargetJql"]),
+				RewrittenTargetJQL: asString(row["rewrittenTargetJql"]),
+				Status:             asString(row["status"]),
+				Reason:             asString(row["reason"]),
+			})
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 func filterTeamClauseRowsFromValue(value any) []FilterTeamClauseRow {
 	switch rows := value.(type) {
 	case []FilterTeamClauseRow:
@@ -905,6 +1066,28 @@ func mappedTargetTeamIDs(raw string, targetTeamIDs map[string]string) []string {
 	return out
 }
 
+func mappedTargetTeamRewritePairs(raw string, targetTeamIDs map[string]string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';'
+	})
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		sourceID := strings.TrimSpace(part)
+		targetID := strings.TrimSpace(targetTeamIDs[sourceID])
+		if sourceID == "" || targetID == "" {
+			continue
+		}
+		pair := fmt.Sprintf("Team = %s -> Team = %s", sourceID, targetID)
+		if _, ok := seen[pair]; ok {
+			continue
+		}
+		seen[pair] = struct{}{}
+		out = append(out, pair)
+	}
+	return out
+}
+
 func countMappedIssueUpdates(rows []IssueTeamRow, targetTeamIDs map[string]string) int {
 	count := 0
 	for _, row := range rows {
@@ -919,6 +1102,26 @@ func countMappedFilterUpdates(rows []FilterTeamClauseRow, targetTeamIDs map[stri
 	count := 0
 	for _, row := range rows {
 		if strings.TrimSpace(targetTeamIDs[row.SourceTeamID]) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func countReadyFilterUpdates(rows []PostMigrationFilterComparisonRow) int {
+	count := 0
+	for _, row := range rows {
+		if row.Status == "ready" {
+			count++
+		}
+	}
+	return count
+}
+
+func countReadyParentLinkUpdates(rows []PostMigrationParentLinkComparisonRow) int {
+	count := 0
+	for _, row := range rows {
+		if row.Status == "ready" {
 			count++
 		}
 	}
@@ -1064,6 +1267,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --output-dir            Directory for generated reports")
 	fmt.Fprintln(w, "  --format                Report output: json or csv")
 	fmt.Fprintln(w, "  --team-scope            Team migration scope: all, shared-only, or non-shared-only")
+	fmt.Fprintln(w, "  --issue-project-scope   Issue correction scope: all or a comma-separated list of Jira project keys")
 	fmt.Fprintln(w, "  --scan-filters          Scan visible Jira filters for Team = {id|name} clauses")
 	fmt.Fprintln(w, "  --config                Path to config.yaml profile store")
 	fmt.Fprintln(w, "  --profile               Saved profile name")

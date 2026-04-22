@@ -111,8 +111,8 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
                     (operator == Operator.EQUALS || operator == Operator.IN)
 
             boolean operandIsId =
-                    (operand instanceof SingleValueOperand && operand.value?.isLong()) ||
-                    (operand instanceof MultiValueOperand && operand.values.every { it instanceof SingleValueOperand && it.value?.isLong() })
+                    (operand instanceof SingleValueOperand && operandValueIsId(operand.value)) ||
+                    (operand instanceof MultiValueOperand && operand.values.every { it instanceof SingleValueOperand && operandValueIsId(it.value) })
 
             return fieldMatch && operatorMatch && operandIsId
         }
@@ -328,4 +328,8 @@ List<Clause> notClauseChildren(NotClause clause) {
     }
 
     return []
+}
+
+boolean operandValueIsId(value) {
+    return value != null && value.toString().trim().replaceAll(/^["']|["']$/, "").isLong()
 }

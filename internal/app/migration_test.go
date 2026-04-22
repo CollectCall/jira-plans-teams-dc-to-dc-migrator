@@ -567,6 +567,7 @@ func TestBuildFilterTeamClauseRowsMatchesByIDAndName(t *testing.T) {
 	teams := []TeamDTO{
 		{ID: 42, Title: "Red Team"},
 		{ID: 7, Title: "Blue Team"},
+		{ID: 234, Title: "Gold Team"},
 	}
 	filters := []JiraFilter{
 		{
@@ -583,44 +584,150 @@ func TestBuildFilterTeamClauseRowsMatchesByIDAndName(t *testing.T) {
 		},
 		{
 			ID:   "10002",
+			Name: "Quoted Numeric Team Filter",
+			JQL:  `project = ABC AND Team = "42"`,
+		},
+		{
+			ID:   "10003",
+			Name: "Numeric Team IN Filter",
+			JQL:  `project = ABC AND Team IN (42, 234)`,
+		},
+		{
+			ID:   "10004",
+			Name: "Quoted Numeric Team IN Filter",
+			JQL:  `project = ABC AND Team IN ("42", "234")`,
+		},
+		{
+			ID:   "10005",
 			Name: "Unrelated Filter",
 			JQL:  `project = ABC AND Team = "Green Team"`,
 		},
 	}
 
 	rows := buildFilterTeamClauseRows(filters, teams)
-	if len(rows) != 2 {
-		t.Fatalf("expected 2 matches, got %d", len(rows))
+	want := []FilterTeamClauseRow{
+		{
+			FilterID:       "10000",
+			FilterName:     "Numeric Team Filter",
+			Owner:          "Jane Doe",
+			MatchType:      "team_id",
+			ClauseValue:    "42",
+			SourceTeamID:   "42",
+			SourceTeamName: "Red Team",
+			Clause:         "Team = 42",
+			JQL:            "project = ABC AND Team = 42",
+		},
+		{
+			FilterID:       "10001",
+			FilterName:     "Named Team Filter",
+			Owner:          "Jane Doe",
+			MatchType:      "team_name",
+			ClauseValue:    "Blue Team",
+			SourceTeamID:   "7",
+			SourceTeamName: "Blue Team",
+			Clause:         `"Team" = "Blue Team"`,
+			JQL:            `project = ABC AND "Team" = "Blue Team"`,
+		},
+		{
+			FilterID:       "10002",
+			FilterName:     "Quoted Numeric Team Filter",
+			MatchType:      "team_id",
+			ClauseValue:    "42",
+			SourceTeamID:   "42",
+			SourceTeamName: "Red Team",
+			Clause:         `Team = "42"`,
+			JQL:            `project = ABC AND Team = "42"`,
+		},
+		{
+			FilterID:       "10003",
+			FilterName:     "Numeric Team IN Filter",
+			MatchType:      "team_id",
+			ClauseValue:    "42",
+			SourceTeamID:   "42",
+			SourceTeamName: "Red Team",
+			Clause:         "Team IN (42, 234)",
+			JQL:            "project = ABC AND Team IN (42, 234)",
+		},
+		{
+			FilterID:       "10003",
+			FilterName:     "Numeric Team IN Filter",
+			MatchType:      "team_id",
+			ClauseValue:    "234",
+			SourceTeamID:   "234",
+			SourceTeamName: "Gold Team",
+			Clause:         "Team IN (42, 234)",
+			JQL:            "project = ABC AND Team IN (42, 234)",
+		},
+		{
+			FilterID:       "10004",
+			FilterName:     "Quoted Numeric Team IN Filter",
+			MatchType:      "team_id",
+			ClauseValue:    "42",
+			SourceTeamID:   "42",
+			SourceTeamName: "Red Team",
+			Clause:         `Team IN ("42", "234")`,
+			JQL:            `project = ABC AND Team IN ("42", "234")`,
+		},
+		{
+			FilterID:       "10004",
+			FilterName:     "Quoted Numeric Team IN Filter",
+			MatchType:      "team_id",
+			ClauseValue:    "234",
+			SourceTeamID:   "234",
+			SourceTeamName: "Gold Team",
+			Clause:         `Team IN ("42", "234")`,
+			JQL:            `project = ABC AND Team IN ("42", "234")`,
+		},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("unexpected rows:\nwant: %#v\ngot:  %#v", want, rows)
+	}
+}
+
+func TestBuildPostMigrationFilterRewritePlansCombinesTeamINClauseRows(t *testing.T) {
+	rows := []PostMigrationFilterComparisonRow{
+		{
+			SourceFilterID:     "10000",
+			SourceFilterName:   "Team IN Filter",
+			SourceClause:       "Team IN (42, 234)",
+			SourceTeamID:       "42",
+			TargetFilterID:     "20000",
+			TargetFilterName:   "Team IN Filter",
+			TargetTeamID:       "4200",
+			CurrentTargetJQL:   "project = ABC AND Team IN (42, 234)",
+			RewrittenTargetJQL: "project = ABC AND Team IN (4200, 234)",
+			Status:             "ready",
+		},
+		{
+			SourceFilterID:     "10000",
+			SourceFilterName:   "Team IN Filter",
+			SourceClause:       "Team IN (42, 234)",
+			SourceTeamID:       "234",
+			TargetFilterID:     "20000",
+			TargetFilterName:   "Team IN Filter",
+			TargetTeamID:       "2340",
+			CurrentTargetJQL:   "project = ABC AND Team IN (42, 234)",
+			RewrittenTargetJQL: "project = ABC AND Team IN (42, 2340)",
+			Status:             "ready",
+		},
+	}
+	filters := map[string]JiraFilter{
+		"20000": {
+			ID:   "20000",
+			Name: "Team IN Filter",
+			JQL:  "project = ABC AND Team IN (42, 234)",
+		},
 	}
 
-	wantFirst := FilterTeamClauseRow{
-		FilterID:       "10000",
-		FilterName:     "Numeric Team Filter",
-		Owner:          "Jane Doe",
-		MatchType:      "team_id",
-		ClauseValue:    "42",
-		SourceTeamID:   "42",
-		SourceTeamName: "Red Team",
-		Clause:         "Team = 42",
-		JQL:            "project = ABC AND Team = 42",
+	plans := buildPostMigrationFilterRewritePlans(rows, filters)
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan, got %d", len(plans))
 	}
-	if !reflect.DeepEqual(rows[0], wantFirst) {
-		t.Fatalf("unexpected first row:\nwant: %#v\ngot:  %#v", wantFirst, rows[0])
+	if plans[0].Status != "ready" {
+		t.Fatalf("expected ready plan, got %q: %s", plans[0].Status, plans[0].Message)
 	}
-
-	wantSecond := FilterTeamClauseRow{
-		FilterID:       "10001",
-		FilterName:     "Named Team Filter",
-		Owner:          "Jane Doe",
-		MatchType:      "team_name",
-		ClauseValue:    "Blue Team",
-		SourceTeamID:   "7",
-		SourceTeamName: "Blue Team",
-		Clause:         `"Team" = "Blue Team"`,
-		JQL:            `project = ABC AND "Team" = "Blue Team"`,
-	}
-	if !reflect.DeepEqual(rows[1], wantSecond) {
-		t.Fatalf("unexpected second row:\nwant: %#v\ngot:  %#v", wantSecond, rows[1])
+	if plans[0].RewrittenTargetJQL != "project = ABC AND Team IN (4200, 2340)" {
+		t.Fatalf("unexpected rewritten JQL %q", plans[0].RewrittenTargetJQL)
 	}
 }
 

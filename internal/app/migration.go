@@ -2394,10 +2394,14 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 			continue
 		}
 
-		for _, row := range readyRows {
-			rewrittenClause := strings.Replace(row.SourceClause, row.SourceTeamID, row.TargetTeamID, 1)
-			if strings.Contains(rewrittenJQL, row.SourceClause) {
-				rewrittenJQL = strings.Replace(rewrittenJQL, row.SourceClause, rewrittenClause, 1)
+		for _, clauseGroup := range groupReadyFilterRowsByClause(readyRows) {
+			sourceClause := clauseGroup[0].SourceClause
+			rewrittenClause := sourceClause
+			for _, row := range clauseGroup {
+				rewrittenClause = strings.Replace(rewrittenClause, row.SourceTeamID, row.TargetTeamID, 1)
+			}
+			if strings.Contains(rewrittenJQL, sourceClause) {
+				rewrittenJQL = strings.Replace(rewrittenJQL, sourceClause, rewrittenClause, 1)
 				continue
 			}
 			if strings.Contains(rewrittenJQL, rewrittenClause) {
@@ -2439,6 +2443,40 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 		return left < right
 	})
 	return plans
+}
+
+func groupReadyFilterRowsByClause(rows []PostMigrationFilterComparisonRow) [][]PostMigrationFilterComparisonRow {
+	grouped := map[string][]PostMigrationFilterComparisonRow{}
+	for _, row := range rows {
+		grouped[row.SourceClause] = append(grouped[row.SourceClause], row)
+	}
+
+	clauses := make([]string, 0, len(grouped))
+	for clause := range grouped {
+		clauses = append(clauses, clause)
+	}
+	sort.SliceStable(clauses, func(i, j int) bool {
+		if len(clauses[i]) == len(clauses[j]) {
+			return clauses[i] < clauses[j]
+		}
+		return len(clauses[i]) > len(clauses[j])
+	})
+
+	out := make([][]PostMigrationFilterComparisonRow, 0, len(clauses))
+	for _, clause := range clauses {
+		group := grouped[clause]
+		sort.SliceStable(group, func(i, j int) bool {
+			if len(group[i].SourceTeamID) != len(group[j].SourceTeamID) {
+				return len(group[i].SourceTeamID) > len(group[j].SourceTeamID)
+			}
+			if group[i].SourceTeamID != group[j].SourceTeamID {
+				return group[i].SourceTeamID < group[j].SourceTeamID
+			}
+			return group[i].TargetTeamID < group[j].TargetTeamID
+		})
+		out = append(out, group)
+	}
+	return out
 }
 
 func rewriteTeamFieldIDs(raw any, replacements map[string]string) (any, bool) {

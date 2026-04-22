@@ -39,7 +39,15 @@ type teamFilterParseError struct {
 	Error string `json:"error"`
 }
 
-var teamEqualsClausePattern = regexp.MustCompile(`(?i)(?:"?team"?|\bteam\b)\s*=\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.:-]+))`)
+var (
+	teamEqualsClausePattern = regexp.MustCompile(`(?i)(?:"?team"?|\bteam\b)\s*=\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.:-]+))`)
+	teamInClausePattern     = regexp.MustCompile(`(?i)(?:"?team"?|\bteam\b)\s+in\s*\(([^)]*)\)`)
+)
+
+type teamClauseMatch struct {
+	clause string
+	value  string
+}
 
 func filterInventoryCSVExampleQuery() string {
 	return `SELECT id AS "Filter ID", filtername AS "Filter Name", authorname AS "Owner", reqcontent AS "JQL" FROM searchrequest WHERE reqcontent IS NOT NULL AND (LOWER(reqcontent) LIKE '%team%' OR LOWER(reqcontent) LIKE '%cf[%') ORDER BY id;`
@@ -239,11 +247,10 @@ func buildFilterTeamClauseRows(filters []JiraFilter, teams []TeamDTO) []FilterTe
 		if strings.TrimSpace(filter.JQL) == "" {
 			continue
 		}
-		matches := teamEqualsClausePattern.FindAllStringSubmatch(filter.JQL, -1)
+		matches := extractTeamClauseMatches(filter.JQL)
 		for _, match := range matches {
-			clause := strings.TrimSpace(match[0])
-			value := firstNonEmptyFilterValue(match[1], match[2], match[3])
-			value = strings.TrimSpace(value)
+			clause := strings.TrimSpace(match.clause)
+			value := strings.TrimSpace(match.value)
 			if value == "" {
 				continue
 			}
@@ -275,6 +282,83 @@ func buildFilterTeamClauseRows(filters []JiraFilter, teams []TeamDTO) []FilterTe
 	}
 
 	return rows
+}
+
+func extractTeamClauseMatches(jql string) []teamClauseMatch {
+	matches := make([]teamClauseMatch, 0)
+	for _, match := range teamEqualsClausePattern.FindAllStringSubmatch(jql, -1) {
+		value := strings.TrimSpace(firstNonEmptyFilterValue(match[1], match[2], match[3]))
+		if value == "" {
+			continue
+		}
+		matches = append(matches, teamClauseMatch{
+			clause: strings.TrimSpace(match[0]),
+			value:  value,
+		})
+	}
+
+	for _, match := range teamInClausePattern.FindAllStringSubmatch(jql, -1) {
+		clause := strings.TrimSpace(match[0])
+		for _, value := range splitJQLListValues(match[1]) {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			matches = append(matches, teamClauseMatch{
+				clause: clause,
+				value:  value,
+			})
+		}
+	}
+
+	return matches
+}
+
+func splitJQLListValues(raw string) []string {
+	values := make([]string, 0)
+	var current strings.Builder
+	var quote rune
+	escaped := false
+
+	flush := func() {
+		value := strings.TrimSpace(current.String())
+		current.Reset()
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		value = strings.TrimSpace(value)
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+
+	for _, r := range raw {
+		switch {
+		case escaped:
+			current.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			current.WriteRune(r)
+			escaped = true
+		case quote != 0:
+			current.WriteRune(r)
+			if r == quote {
+				quote = 0
+			}
+		case r == '"' || r == '\'':
+			current.WriteRune(r)
+			quote = r
+		case r == ',':
+			flush()
+		default:
+			current.WriteRune(r)
+		}
+	}
+	flush()
+
+	return values
 }
 
 func writeFilterTeamClauseExport(cfg Config, rows []FilterTeamClauseRow) (string, error) {

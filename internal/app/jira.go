@@ -32,14 +32,17 @@ type jiraClient struct {
 	baseURL         string
 	username        string
 	password        string
+	cookie          string
 	httpClient      *http.Client
 }
 
 type jiraAPIError struct {
-	Method     string
-	Endpoint   string
-	StatusCode int
-	Message    string
+	Method           string
+	Endpoint         string
+	StatusCode       int
+	Message          string
+	LoginReason      string
+	AuthDeniedReason string
 }
 
 func (e *jiraAPIError) Error() string {
@@ -47,12 +50,26 @@ func (e *jiraAPIError) Error() string {
 	case http.StatusUnauthorized:
 		return fmt.Sprintf("%s %s returned 401: Jira authentication failed; check the username/password you entered for this instance", e.Method, e.Endpoint)
 	case http.StatusForbidden:
-		return fmt.Sprintf("%s %s returned 403: Jira authenticated the request but denied access; check the permissions for this instance", e.Method, e.Endpoint)
+		details := []string{}
+		if strings.TrimSpace(e.LoginReason) != "" {
+			details = append(details, e.LoginReason)
+		}
+		if strings.TrimSpace(e.AuthDeniedReason) != "" {
+			details = append(details, e.AuthDeniedReason)
+		}
+		if len(details) > 0 {
+			return fmt.Sprintf("%s %s returned 403: Jira denied the request (%s): %s", e.Method, e.Endpoint, strings.Join(details, "; "), nonEmptyString(e.Message, "empty error response"))
+		}
+		return fmt.Sprintf("%s %s returned 403: Jira denied the request: %s", e.Method, e.Endpoint, nonEmptyString(e.Message, "empty error response"))
 	}
 	return fmt.Sprintf("%s %s returned %d: %s", e.Method, e.Endpoint, e.StatusCode, e.Message)
 }
 
 func newJiraClient(baseURL, username, password string) (*jiraClient, error) {
+	return newJiraClientWithCookie(baseURL, username, password, "")
+}
+
+func newJiraClientWithCookie(baseURL, username, password, cookie string) (*jiraClient, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, fmt.Errorf("jira base URL is required")
 	}
@@ -61,6 +78,7 @@ func newJiraClient(baseURL, username, password string) (*jiraClient, error) {
 		baseURL:         normalizeAPIBaseURL(baseURL),
 		username:        username,
 		password:        password,
+		cookie:          cookie,
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
@@ -167,6 +185,18 @@ func (c *jiraClient) ListFields() ([]JiraField, error) {
 		return nil, err
 	}
 	return fields, nil
+}
+
+func (c *jiraClient) CurrentUser() (*CoreJiraUser, error) {
+	body, err := c.doCoreJSON(http.MethodGet, "/rest/api/2/myself", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var user CoreJiraUser
+	if err := json.Unmarshal(body, &user); err != nil {
+		return nil, err
+	}
+	return &user, nil
 }
 
 func (c *jiraClient) SearchIssues(jql string, fields []string, progress func(current, total int)) ([]JiraIssue, error) {
@@ -544,11 +574,15 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 			return nil, err
 		}
 		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "teams-migrator/"+currentVersion())
 		if payload != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
 		if c.username != "" || c.password != "" {
 			req.SetBasicAuth(c.username, c.password)
+		}
+		if strings.TrimSpace(c.cookie) != "" {
+			req.Header.Set("Cookie", c.cookie)
 		}
 
 		resp, err := c.httpClient.Do(req)
@@ -572,10 +606,12 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 		}
 
 		apiErr := &jiraAPIError{
-			Method:     method,
-			Endpoint:   endpoint,
-			StatusCode: resp.StatusCode,
-			Message:    summarizeJiraError(data),
+			Method:           method,
+			Endpoint:         endpoint,
+			StatusCode:       resp.StatusCode,
+			Message:          summarizeJiraError(data),
+			LoginReason:      resp.Header.Get("X-Seraph-LoginReason"),
+			AuthDeniedReason: resp.Header.Get("X-Authentication-Denied-Reason"),
 		}
 		lastErr = apiErr
 

@@ -15,9 +15,11 @@ const (
 	envSourceBaseURL     = "TEAMS_MIGRATOR_SOURCE_BASE_URL"
 	envSourceUsername    = "TEAMS_MIGRATOR_SOURCE_USERNAME"
 	envSourcePassword    = "TEAMS_MIGRATOR_SOURCE_PASSWORD"
+	envSourceCookie      = "TEAMS_MIGRATOR_SOURCE_COOKIE"
 	envTargetBaseURL     = "TEAMS_MIGRATOR_TARGET_BASE_URL"
 	envTargetUsername    = "TEAMS_MIGRATOR_TARGET_USERNAME"
 	envTargetPassword    = "TEAMS_MIGRATOR_TARGET_PASSWORD"
+	envTargetCookie      = "TEAMS_MIGRATOR_TARGET_COOKIE"
 	envIdentityMapping   = "TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE"
 	envTeamsFile         = "TEAMS_MIGRATOR_TEAMS_FILE"
 	envPersonsFile       = "TEAMS_MIGRATOR_PERSONS_FILE"
@@ -44,9 +46,11 @@ type Config struct {
 	SourceBaseURL               string
 	SourceUsername              string
 	SourcePassword              string
+	SourceCookie                string
 	TargetBaseURL               string
 	TargetUsername              string
 	TargetPassword              string
+	TargetCookie                string
 	IdentityMappingFile         string
 	IdentityMappingSet          bool
 	TeamsFile                   string
@@ -59,6 +63,8 @@ type Config struct {
 	ReportFormat                ReportFormat
 	TeamScope                   string
 	IssueProjectScope           string
+	IssueTeamIDsInScope         bool
+	IssueTeamIDsInScopeSet      bool
 	FilterTeamIDsInScope        bool
 	FilterTeamIDsInScopeSet     bool
 	ParentLinkInScope           bool
@@ -90,9 +96,11 @@ func parseConfig(args []string) (Config, error) {
 	fs.StringVar(&cfg.SourceBaseURL, "source-base-url", envValue(envSourceBaseURL), "Source Jira base URL")
 	fs.StringVar(&cfg.SourceUsername, "source-username", envValue(envSourceUsername), "Source Jira username for basic auth")
 	fs.StringVar(&cfg.SourcePassword, "source-password", envValue(envSourcePassword), "Source Jira password for basic auth")
+	fs.StringVar(&cfg.SourceCookie, "source-cookie", envValue(envSourceCookie), "Source Jira Cookie header value for session-authenticated instances")
 	fs.StringVar(&cfg.TargetBaseURL, "target-base-url", envValue(envTargetBaseURL), "Target Jira base URL")
 	fs.StringVar(&cfg.TargetUsername, "target-username", envValue(envTargetUsername), "Target Jira username for basic auth")
 	fs.StringVar(&cfg.TargetPassword, "target-password", envValue(envTargetPassword), "Target Jira password for basic auth")
+	fs.StringVar(&cfg.TargetCookie, "target-cookie", envValue(envTargetCookie), "Target Jira Cookie header value for session-authenticated instances")
 	fs.StringVar(&cfg.IdentityMappingFile, "identity-mapping", envValue(envIdentityMapping), "Path to identity mapping CSV")
 	fs.StringVar(&cfg.TeamsFile, "teams-file", envValue(envTeamsFile), "Path to source teams JSON export")
 	fs.StringVar(&cfg.PersonsFile, "persons-file", envValue(envPersonsFile), "Path to source persons JSON export")
@@ -280,6 +288,8 @@ func (c Config) requireCoreInputs() []Finding {
 	}
 	if c.TargetBaseURL == "" {
 		findings = append(findings, newFinding(SeverityWarning, "missing_target_base_url", "Target Jira base URL was not provided"))
+	} else if strings.TrimSpace(c.TargetCookie) == "" && (strings.TrimSpace(c.TargetUsername) == "" || strings.TrimSpace(c.TargetPassword) == "") {
+		findings = append(findings, newFinding(SeverityError, "missing_target_credentials", "Target Jira credentials were not provided; set --target-username/--target-password, TEAMS_MIGRATOR_TARGET_USERNAME/TEAMS_MIGRATOR_TARGET_PASSWORD, --target-cookie, or TEAMS_MIGRATOR_TARGET_COOKIE"))
 	}
 	findings = append(findings, validateMigrationPhaseInputs(c)...)
 

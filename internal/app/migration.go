@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -33,6 +34,7 @@ type migrationState struct {
 	TeamsField                *TeamsFieldSelection
 	IssueTeamRows             []IssueTeamRow
 	ParentLinkRows            []ParentLinkRow
+	TargetParentLinkField     *ParentLinkFieldRow
 	FilterTeamClauseRows      []FilterTeamClauseRow
 	TargetIssueSnapshots      []TargetIssueSnapshotRow
 	IssueComparisons          []PostMigrationIssueComparisonRow
@@ -86,7 +88,7 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 		return state, findings, actions
 	}
 
-	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+	targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie)
 	if err != nil {
 		findings = append(findings, newFinding(SeverityError, "target_client", err.Error()))
 		return state, findings, actions
@@ -129,31 +131,33 @@ func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) 
 	var findings []Finding
 	var actions []Action
 
-	if len(state.IssueTeamRows) == 0 {
-		if issuePath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-teams.pre-migration.csv"); ok {
-			rows, err := loadIssueTeamRowsFromExport(issuePath)
-			if err != nil {
-				findings = append(findings, newFinding(SeverityWarning, "migration_issue_mapping_input_load_failed", fmt.Sprintf("Could not load issue/team export %s: %v", issuePath, err)))
-			} else {
-				state.IssueTeamRows = rows
-				state.IssueExportPath = issuePath
+	if issueTeamCorrectionsInScope(cfg) {
+		if len(state.IssueTeamRows) == 0 {
+			if issuePath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-teams.pre-migration.csv"); ok {
+				rows, err := loadIssueTeamRowsFromExport(issuePath)
+				if err != nil {
+					findings = append(findings, newFinding(SeverityWarning, "migration_issue_mapping_input_load_failed", fmt.Sprintf("Could not load issue/team export %s: %v", issuePath, err)))
+				} else {
+					state.IssueTeamRows = rows
+					state.IssueExportPath = issuePath
+				}
 			}
 		}
-	}
-	if len(state.IssueTeamRows) > 0 {
-		exportPath, err := writePostMigrationIssueTeamExport(cfg, state.IssueTeamRows, state.TeamMappings)
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "migration_issue_mapping_export_failed", err.Error()))
-		} else if exportPath != "" {
-			artifact := Artifact{
-				Key:   "post_migrate_issue_team_mapping",
-				Label: "Post-migration issue/team mapping",
-				Path:  exportPath,
-				Count: len(state.IssueTeamRows),
+		if len(state.IssueTeamRows) > 0 {
+			exportPath, err := writePostMigrationIssueTeamExport(cfg, state.IssueTeamRows, state.TeamMappings)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "migration_issue_mapping_export_failed", err.Error()))
+			} else if exportPath != "" {
+				artifact := Artifact{
+					Key:   "post_migrate_issue_team_mapping",
+					Label: "Post-migration issue/team mapping",
+					Path:  exportPath,
+					Count: len(state.IssueTeamRows),
+				}
+				state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+				actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+				findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
 			}
-			state.Artifacts = replaceArtifact(state.Artifacts, artifact)
-			actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
-			findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
 		}
 	}
 
@@ -224,7 +228,10 @@ func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) 
 }
 
 func preparePostMigrationTargetArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
-	findings := preparePostMigrationTargetIssueArtifacts(cfg, state, progress)
+	var findings []Finding
+	if issueTeamCorrectionsInScope(cfg) {
+		findings = append(findings, preparePostMigrationTargetIssueArtifacts(cfg, state, progress)...)
+	}
 	findings = append(findings, preparePostMigrationTargetParentLinkArtifacts(cfg, state, progress)...)
 	return append(findings, preparePostMigrationTargetFilterArtifacts(cfg, state, progress)...)
 }
@@ -238,7 +245,7 @@ func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState,
 	state.IssueComparisons = nil
 
 	progressStart(progress, "Resolving target Teams field for issue comparison")
-	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+	targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie)
 	if err != nil {
 		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_issue_client", fmt.Sprintf("Could not create target Jira client for issue lookup: %v", err))}
@@ -312,26 +319,15 @@ func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationS
 	state.TargetParentLinkSnapshots = nil
 	state.ParentLinkComparisons = nil
 
-	progressStart(progress, "Resolving target Parent Link field")
-	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+	targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie)
 	if err != nil {
-		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_parent_link_client", fmt.Sprintf("Could not create target Jira client for Parent Link lookup: %v", err))}
 	}
 
-	fields, err := targetClient.ListFields()
-	if err != nil {
-		progressEnd(progress)
-		return []Finding{newFinding(SeverityWarning, "post_migrate_target_parent_link_field_lookup_failed", fmt.Sprintf("Could not load target Jira fields for Parent Link comparison: %v", err))}
-	}
-
-	field, selectionFindings := selectParentLinkField(fields)
-	findings := append([]Finding{}, selectionFindings...)
+	field, findings := loadOrResolveTargetParentLinkField(cfg, state, targetClient, progress)
 	if field == nil {
-		progressEnd(progress)
-		return append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_field_missing", "Could not resolve the target Jira Parent Link field for comparison"))
+		return findings
 	}
-	progressEnd(progress)
 
 	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_parent_link_lookup_started", fmt.Sprintf("Resolving target Parent Link state for %d source rows using field %s (%s)", len(state.ParentLinkRows), field.Name, field.ID)))
 
@@ -394,6 +390,85 @@ func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationS
 	return findings
 }
 
+func loadOrResolveTargetParentLinkField(cfg Config, state *migrationState, targetClient *jiraClient, progress *progressTracker) (*JiraField, []Finding) {
+	if state.TargetParentLinkField != nil && strings.TrimSpace(state.TargetParentLinkField.FieldID) != "" {
+		return parentLinkFieldRowToJiraField(*state.TargetParentLinkField), nil
+	}
+
+	if path, ok := latestOutputFamilyPath(cfg.OutputDir, "target-parent-link-field.pre-migration.csv"); ok {
+		progressStart(progress, "Loading pre-migration target Parent Link field")
+		row, err := loadParentLinkFieldFromExport(path)
+		progressEnd(progress)
+		if err != nil {
+			return nil, []Finding{newFinding(SeverityWarning, "post_migrate_target_parent_link_field_reuse_failed", fmt.Sprintf("Could not reuse target Parent Link field export %s: %v", path, err))}
+		}
+		if row != nil && strings.TrimSpace(row.FieldID) != "" {
+			state.TargetParentLinkField = row
+			return parentLinkFieldRowToJiraField(*row), []Finding{newFinding(SeverityInfo, "post_migrate_target_parent_link_field_reused", fmt.Sprintf("Reused target Parent Link field export: %s", path))}
+		}
+	}
+
+	progressStart(progress, "Resolving target Parent Link field")
+	fields, err := targetClient.ListFields()
+	if err != nil {
+		progressEnd(progress)
+		return nil, []Finding{newFinding(SeverityWarning, "post_migrate_target_parent_link_field_lookup_failed", fmt.Sprintf("Could not load target Jira fields for Parent Link comparison: %v", err))}
+	}
+
+	field, selectionFindings := selectParentLinkField(fields)
+	findings := append([]Finding{}, selectionFindings...)
+	if field == nil {
+		progressEnd(progress)
+		return nil, append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_field_missing", "Could not resolve the target Jira Parent Link field for comparison"))
+	}
+	progressEnd(progress)
+	state.TargetParentLinkField = parentLinkFieldRowFromJiraField(*field)
+	return field, findings
+}
+
+func resolveTargetParentLinkFieldForExport(cfg Config, targetClient *jiraClient) (*ParentLinkFieldRow, string, []Finding) {
+	fields, err := targetClient.ListFields()
+	if err != nil {
+		return nil, "", []Finding{newFinding(SeverityWarning, "target_parent_link_field_lookup_failed", fmt.Sprintf("Could not load target Jira fields for Parent Link field export: %v", err))}
+	}
+
+	field, findings := selectParentLinkField(fields)
+	if field == nil {
+		return nil, "", append(findings, newFinding(SeverityWarning, "target_parent_link_field_missing", "Could not resolve the target Jira Parent Link field for pre-migration export"))
+	}
+
+	row := parentLinkFieldRowFromJiraField(*field)
+	path, err := writeParentLinkFieldExport(cfg, "target-parent-link-field.pre-migration.csv", *row)
+	if err != nil {
+		return row, "", append(findings, newFinding(SeverityWarning, "target_parent_link_field_export_failed", err.Error()))
+	}
+	return row, path, append(findings, newFinding(SeverityInfo, "target_parent_link_field_exported", fmt.Sprintf("Exported target Parent Link field %s (%s) to %s", field.Name, field.ID, path)))
+}
+
+func parentLinkFieldRowFromJiraField(field JiraField) *ParentLinkFieldRow {
+	row := &ParentLinkFieldRow{
+		FieldID:   field.ID,
+		FieldName: field.Name,
+	}
+	if field.Schema != nil {
+		row.SchemaCustom = field.Schema.Custom
+		row.SchemaType = field.Schema.Type
+	}
+	return row
+}
+
+func parentLinkFieldRowToJiraField(row ParentLinkFieldRow) *JiraField {
+	field := &JiraField{
+		ID:     row.FieldID,
+		Name:   nonEmptyString(row.FieldName, "Parent Link"),
+		Custom: true,
+	}
+	if row.SchemaCustom != "" || row.SchemaType != "" {
+		field.Schema = &JiraFieldSchema{Custom: row.SchemaCustom, Type: row.SchemaType}
+	}
+	return field
+}
+
 func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
 	if !cfg.FilterTeamIDsInScope || len(state.FilterTeamClauseRows) == 0 {
 		return nil
@@ -405,7 +480,7 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 	state.FilterComparisons = nil
 
 	progressStart(progress, "Resolving target Teams field for filter comparison")
-	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+	targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie)
 	if err != nil {
 		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_filter_client", fmt.Sprintf("Could not create target Jira client for filter lookup: %v", err))}
@@ -948,25 +1023,13 @@ func buildPostMigrationParentLinkComparisonRow(client *jiraClient, sourceRow Par
 	row.CurrentParentIssueID = currentParentID
 	row.CurrentParentIssueKey = currentParentKey
 
-	if row.CurrentParentIssueID == sourceRow.SourceParentIssueID || (row.CurrentParentIssueKey != "" && row.CurrentParentIssueKey == sourceRow.SourceParentIssueKey) {
-		row.Status = "ready"
-		return row, nil
-	}
-
 	if row.CurrentParentIssueID == targetParent.ID || (row.CurrentParentIssueID == "" && row.CurrentParentIssueKey != "" && row.CurrentParentIssueKey == targetParent.Key) {
 		row.Status = "already_rewritten"
 		row.Reason = "the target issue already points to the mapped target parent issue"
 		return row, nil
 	}
 
-	if row.CurrentParentIssueID == "" && row.CurrentParentIssueKey == "" {
-		row.Status = "no_current_parent_link"
-		row.Reason = "the target child issue does not currently have a Parent Link value"
-		return row, nil
-	}
-
-	row.Status = "source_parent_not_found_in_target_issue"
-	row.Reason = "the current target child issue does not point to the expected source parent reference"
+	row.Status = "ready"
 	return row, nil
 }
 
@@ -1155,7 +1218,10 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	var findings []Finding
 	progressTotal := 13
 	if runsPreMigratePhase(cfg.Command, cfg.Phase) {
-		progressTotal += 3
+		progressTotal += 2
+		if issueTeamCorrectionsInScope(cfg) {
+			progressTotal++
+		}
 		if cfg.ParentLinkInScope {
 			progressTotal++
 		}
@@ -1204,6 +1270,7 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		code     string
 		severity Severity
 		message  string
+		err      error
 	}
 	results := make(chan loadResult, 10)
 	var wg sync.WaitGroup
@@ -1217,66 +1284,76 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 				task.Update(current, total)
 			})
 			if err != nil {
-				results <- loadResult{code: code, severity: severity, message: err.Error()}
+				results <- loadResult{code: code, severity: severity, message: fmt.Sprintf("%s: %s", strings.ToLower(label), err.Error()), err: err}
 			}
 		}()
 	}
 
 	runLoad("Loading source teams", "source_teams_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourceTeams, loadErr = loadTeams(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.TeamsFile, progressFn)
+		sourceTeams, loadErr = loadTeams(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie, cfg.TeamsFile, progressFn)
 		return loadErr
 	})
 	runLoad("Loading source programs", "source_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
+		sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie, progressFn)
 		return loadErr
 	})
 	runLoad("Loading source plans", "source_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
+		sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie, progressFn)
 		return loadErr
 	})
 	runLoad("Loading source persons", "source_persons_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.PersonsFile, progressFn)
+		sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie, cfg.PersonsFile, progressFn)
 		return loadErr
 	})
 	runLoad("Loading source resources", "source_resources_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourceResources, loadErr = loadResources(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.ResourcesFile, progressFn)
+		sourceResources, loadErr = loadResources(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie, cfg.ResourcesFile, progressFn)
 		return loadErr
 	})
 	runLoad("Loading target teams", "target_teams_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetTeams, loadErr = loadTeams(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
+		targetTeams, loadErr = loadTeams(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie, "", progressFn)
 		return loadErr
 	})
 	runLoad("Loading target programs", "target_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
+		targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie, progressFn)
 		return loadErr
 	})
 	runLoad("Loading target plans", "target_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
+		targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie, progressFn)
 		return loadErr
 	})
 	runLoad("Loading target persons", "target_persons_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
+		targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie, "", progressFn)
 		return loadErr
 	})
 	runLoad("Loading target resources", "target_resources_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetResources, loadErr = loadResources(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
+		targetResources, loadErr = loadResources(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie, "", progressFn)
 		return loadErr
 	})
 
 	wg.Wait()
 	close(results)
+	targetForbidden := false
 	for result := range results {
 		findings = append(findings, newFinding(result.severity, result.code, result.message))
+		var apiErr *jiraAPIError
+		if strings.HasPrefix(result.code, "target_") && errors.As(result.err, &apiErr) && apiErr.StatusCode == http.StatusForbidden {
+			targetForbidden = true
+		}
+	}
+	if targetForbidden {
+		if finding := targetAuthDiagnosticFinding(cfg); finding != nil {
+			findings = append(findings, *finding)
+		}
 	}
 
 	sourceClient, sourceClientErr := sourceIssueClient(cfg)
@@ -1284,7 +1361,9 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	if needsSourceIssueInputs && sourceClientErr != nil && cfg.SourceBaseURL != "" {
 		findings = append(findings, newFinding(SeverityWarning, "source_issue_client", sourceClientErr.Error()))
 	} else if runsPreMigratePhase(cfg.Command, cfg.Phase) && sourceClient == nil {
-		findings = append(findings, newFinding(SeverityWarning, "issue_export_skipped", "Issue Teams-field export was skipped because no source Jira base URL was provided"))
+		if issueTeamCorrectionsInScope(cfg) {
+			findings = append(findings, newFinding(SeverityWarning, "issue_export_skipped", "Issue Teams-field export was skipped because no source Jira base URL was provided"))
+		}
 		if cfg.ParentLinkInScope {
 			findings = append(findings, newFinding(SeverityWarning, "parent_link_export_skipped", "Parent Link export was skipped because no source Jira base URL was provided"))
 		}
@@ -1296,7 +1375,7 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 
 	progress.Start("Hydrating resource-linked persons")
 	if strings.TrimSpace(cfg.SourceBaseURL) != "" {
-		if sourceClient, err := newJiraClient(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword); err == nil {
+		if sourceClient, err := newJiraClientWithCookie(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie); err == nil {
 			sourcePersons, findings = hydrateResourceLinkedPersons(sourceClient, sourcePersons, sourceResources, "source", findings)
 		}
 	}
@@ -1304,7 +1383,7 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 
 	progress.Start("Resolving target Jira users")
 	if strings.TrimSpace(cfg.TargetBaseURL) != "" {
-		if targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword); err == nil {
+		if targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie); err == nil {
 			mapping, targetPersons, findings = resolveTargetUsersForResourcePersons(targetClient, mapping, sourcePersons, sourceResources, targetPersons, findings)
 		}
 	}
@@ -1361,39 +1440,41 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		}
 		progress.End()
 
-		progress.StartCount("Exporting issues with team values")
-		if sourceClient != nil {
-			selection, issueRows, issuePath, issueImportPath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, sourceTeams, progress)
-			state.TeamsField = selection
-			state.IssueTeamRows = issueRows
-			if issuePath != "" {
-				state.IssueExportPath = issuePath
-				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
-					Key:   "source_issues_with_team_values_detailed",
-					Label: "Detailed pre-migration issue/team export",
-					Path:  issuePath,
-					Count: len(issueRows),
-				})
-				if issueImportPath != "" {
-					state.IssueImportExportPath = issueImportPath
+		if issueTeamCorrectionsInScope(cfg) {
+			progress.StartCount("Exporting issues with team values")
+			if sourceClient != nil {
+				selection, issueRows, issuePath, issueImportPath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, sourceTeams, progress)
+				state.TeamsField = selection
+				state.IssueTeamRows = issueRows
+				if issuePath != "" {
+					state.IssueExportPath = issuePath
 					state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
-						Key:   "source_issues_with_team_values_import",
-						Label: "Import-ready issue/team CSV",
-						Path:  issueImportPath,
+						Key:   "source_issues_with_team_values_detailed",
+						Label: "Detailed pre-migration issue/team export",
+						Path:  issuePath,
 						Count: len(issueRows),
 					})
+					if issueImportPath != "" {
+						state.IssueImportExportPath = issueImportPath
+						state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+							Key:   "source_issues_with_team_values_import",
+							Label: "Import-ready issue/team CSV",
+							Path:  issueImportPath,
+							Count: len(issueRows),
+						})
+					}
 				}
+				findings = append(findings, issueFindings...)
 			}
-			findings = append(findings, issueFindings...)
+			progress.End()
 		}
-		progress.End()
 
 		if cfg.ParentLinkInScope {
 			progress.StartCount("Exporting issues with Parent Link values")
 			if sourceClient == nil {
 				findings = append(findings, newFinding(SeverityError, "parent_link_export_skipped", "Parent Link export is in scope but no source Jira base URL is available"))
 			} else {
-				field, rows, exportPath, parentFindings := exportIssuesWithParentLink(cfg, sourceClient, progress)
+				field, rows, exportPath, outOfScopePath, parentFindings := exportIssuesWithParentLink(cfg, sourceClient, progress)
 				state.ParentLinkRows = rows
 				findings = append(findings, parentFindings...)
 				if exportPath != "" {
@@ -1405,7 +1486,32 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 					})
 					findings = append(findings, newFinding(SeverityInfo, "source_issues_with_parent_link_generated", fmt.Sprintf("Generated issues with Parent Link export: %s", exportPath)))
 				}
+				if outOfScopePath != "" {
+					state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+						Key:   "source_parent_link_out_of_scope",
+						Label: "Issues with out-of-scope Parent Link",
+						Path:  outOfScopePath,
+					})
+					findings = append(findings, newFinding(SeverityInfo, "source_parent_link_out_of_scope_generated", fmt.Sprintf("Generated out-of-scope Parent Link reference export: %s", outOfScopePath)))
+				}
 				_ = field
+			}
+			progress.End()
+
+			progress.Start("Resolving target Parent Link field")
+			if targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie); err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "target_parent_link_field_client", fmt.Sprintf("Could not create target Jira client for Parent Link field lookup: %v", err)))
+			} else if field, fieldPath, fieldFindings := resolveTargetParentLinkFieldForExport(cfg, targetClient); len(fieldFindings) > 0 {
+				findings = append(findings, fieldFindings...)
+				if field != nil && fieldPath != "" {
+					state.TargetParentLinkField = field
+					state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+						Key:   "target_parent_link_field",
+						Label: "Target Parent Link field",
+						Path:  fieldPath,
+						Count: 1,
+					})
+				}
 			}
 			progress.End()
 		}
@@ -1447,7 +1553,7 @@ func sourceIssueClient(cfg Config) (*jiraClient, error) {
 	if strings.TrimSpace(cfg.SourceBaseURL) == "" {
 		return nil, nil
 	}
-	return newJiraClient(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword)
+	return newJiraClientWithCookie(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie)
 }
 
 func postMigrateCanUsePreparedArtifacts(cfg Config) bool {
@@ -1457,8 +1563,10 @@ func postMigrateCanUsePreparedArtifacts(cfg Config) bool {
 	if _, ok := latestPostMigrateTeamMappingPath(cfg.OutputDir); !ok {
 		return false
 	}
-	if _, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-teams.pre-migration.csv"); !ok {
-		return false
+	if issueTeamCorrectionsInScope(cfg) {
+		if _, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-teams.pre-migration.csv"); !ok {
+			return false
+		}
 	}
 	if cfg.ParentLinkInScope {
 		if _, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv"); !ok {
@@ -1596,54 +1704,56 @@ func validatePostMigratePhaseState(state migrationState) []Finding {
 func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraClient, progress *progressTracker) (migrationState, []Finding) {
 	findings := []Finding{}
 
-	if issuePath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-teams.pre-migration.csv"); ok {
-		progressStart(progress, "Loading pre-migration issue/team export")
-		rows, err := loadIssueTeamRowsFromExport(issuePath)
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_export_reuse_failed", fmt.Sprintf("Could not reuse existing issue/team export %s: %v", issuePath, err)))
-		} else {
-			state.IssueTeamRows = rows
-			state.IssueExportPath = issuePath
-			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
-				Key:   "source_issues_with_team_values_detailed",
-				Label: "Detailed pre-migration issue/team export",
-				Path:  issuePath,
-				Count: len(rows),
-			})
-			findings = append(findings, newFinding(SeverityInfo, "post_migrate_issue_export_reused", fmt.Sprintf("Reused existing issue/team export: %s", issuePath)))
+	if issueTeamCorrectionsInScope(cfg) {
+		if issuePath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-teams.pre-migration.csv"); ok {
+			progressStart(progress, "Loading pre-migration issue/team export")
+			rows, err := loadIssueTeamRowsFromExport(issuePath)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_export_reuse_failed", fmt.Sprintf("Could not reuse existing issue/team export %s: %v", issuePath, err)))
+			} else {
+				state.IssueTeamRows = rows
+				state.IssueExportPath = issuePath
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+					Key:   "source_issues_with_team_values_detailed",
+					Label: "Detailed pre-migration issue/team export",
+					Path:  issuePath,
+					Count: len(rows),
+				})
+				findings = append(findings, newFinding(SeverityInfo, "post_migrate_issue_export_reused", fmt.Sprintf("Reused existing issue/team export: %s", issuePath)))
+			}
+			progressEnd(progress)
 		}
-		progressEnd(progress)
-	}
 
-	if state.IssueExportPath == "" && sourceClient != nil {
-		progressStartCount(progress, "Rebuilding source issue/team export")
-		selection, issueRows, issuePath, issueImportPath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, state.SourceTeams, progress)
-		state.TeamsField = selection
-		state.IssueTeamRows = issueRows
-		findings = append(findings, issueFindings...)
-		if issuePath != "" {
-			state.IssueExportPath = issuePath
-			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
-				Key:   "source_issues_with_team_values_detailed",
-				Label: "Detailed pre-migration issue/team export",
-				Path:  issuePath,
-				Count: len(issueRows),
-			})
+		if state.IssueExportPath == "" && sourceClient != nil {
+			progressStartCount(progress, "Rebuilding source issue/team export")
+			selection, issueRows, issuePath, issueImportPath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, state.SourceTeams, progress)
+			state.TeamsField = selection
+			state.IssueTeamRows = issueRows
+			findings = append(findings, issueFindings...)
+			if issuePath != "" {
+				state.IssueExportPath = issuePath
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+					Key:   "source_issues_with_team_values_detailed",
+					Label: "Detailed pre-migration issue/team export",
+					Path:  issuePath,
+					Count: len(issueRows),
+				})
+			}
+			if issueImportPath != "" {
+				state.IssueImportExportPath = issueImportPath
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+					Key:   "source_issues_with_team_values_import",
+					Label: "Import-ready issue/team CSV",
+					Path:  issueImportPath,
+					Count: len(issueRows),
+				})
+			}
+			progressEnd(progress)
 		}
-		if issueImportPath != "" {
-			state.IssueImportExportPath = issueImportPath
-			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
-				Key:   "source_issues_with_team_values_import",
-				Label: "Import-ready issue/team CSV",
-				Path:  issueImportPath,
-				Count: len(issueRows),
-			})
-		}
-		progressEnd(progress)
-	}
 
-	if state.IssueExportPath == "" {
-		findings = append(findings, newFinding(SeverityError, "post_migrate_issue_input_missing", "Post-migrate phase needs issue/team source data. Run pre-migrate first or provide a source Jira base URL so the tool can rebuild it."))
+		if state.IssueExportPath == "" {
+			findings = append(findings, newFinding(SeverityError, "post_migrate_issue_input_missing", "Post-migrate phase needs issue/team source data. Run pre-migrate first or provide a source Jira base URL so the tool can rebuild it."))
+		}
 	}
 
 	if parentPath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv"); ok {
@@ -1666,7 +1776,7 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 
 	if len(state.ParentLinkRows) == 0 && cfg.ParentLinkInScope && sourceClient != nil {
 		progressStartCount(progress, "Rebuilding source Parent Link export")
-		_, rows, exportPath, parentFindings := exportIssuesWithParentLink(cfg, sourceClient, progress)
+		_, rows, exportPath, outOfScopePath, parentFindings := exportIssuesWithParentLink(cfg, sourceClient, progress)
 		state.ParentLinkRows = rows
 		findings = append(findings, parentFindings...)
 		if exportPath != "" {
@@ -1677,6 +1787,13 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 				Count: len(rows),
 			})
 		}
+		if outOfScopePath != "" {
+			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+				Key:   "source_parent_link_out_of_scope",
+				Label: "Issues with out-of-scope Parent Link",
+				Path:  outOfScopePath,
+			})
+		}
 		progressEnd(progress)
 	}
 
@@ -1684,27 +1801,29 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 		findings = append(findings, newFinding(SeverityError, "post_migrate_parent_link_input_missing", "Post-migrate phase needs the pre-migrate Parent Link export. Run pre-migrate first so source parent references are exported."))
 	}
 
-	if filterPath, ok := latestOutputFamilyPath(cfg.OutputDir, "filters-with-team-clauses.pre-migration.csv"); ok {
-		progressStart(progress, "Loading pre-migration filter Team-clause export")
-		rows, err := loadFilterTeamClauseRowsFromExport(filterPath)
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_export_reuse_failed", fmt.Sprintf("Could not reuse existing filter export %s: %v", filterPath, err)))
-		} else {
-			state.FilterTeamClauseRows = rows
-			state.FilterScanExportPath = filterPath
-			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
-				Key:   "source_filters_with_team_clauses",
-				Label: "Filters with Team clauses",
-				Path:  filterPath,
-				Count: len(rows),
-			})
-			findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_export_reused", fmt.Sprintf("Reused existing filter Team-clause export: %s", filterPath)))
+	if cfg.FilterTeamIDsInScope {
+		if filterPath, ok := latestOutputFamilyPath(cfg.OutputDir, "filters-with-team-clauses.pre-migration.csv"); ok {
+			progressStart(progress, "Loading pre-migration filter Team-clause export")
+			rows, err := loadFilterTeamClauseRowsFromExport(filterPath)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_export_reuse_failed", fmt.Sprintf("Could not reuse existing filter export %s: %v", filterPath, err)))
+			} else {
+				state.FilterTeamClauseRows = rows
+				state.FilterScanExportPath = filterPath
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+					Key:   "source_filters_with_team_clauses",
+					Label: "Filters with Team clauses",
+					Path:  filterPath,
+					Count: len(rows),
+				})
+				findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_export_reused", fmt.Sprintf("Reused existing filter Team-clause export: %s", filterPath)))
+			}
+			progressEnd(progress)
 		}
-		progressEnd(progress)
-	}
 
-	if len(state.FilterTeamClauseRows) == 0 && cfg.FilterTeamIDsInScope {
-		findings = append(findings, newFinding(SeverityError, "post_migrate_filter_input_missing", "Post-migrate phase needs the pre-migrate source filter export. Run pre-migrate first so the source list of filters with team IDs is resolved and exported."))
+		if len(state.FilterTeamClauseRows) == 0 {
+			findings = append(findings, newFinding(SeverityError, "post_migrate_filter_input_missing", "Post-migrate phase needs the pre-migrate source filter export. Run pre-migrate first so the source list of filters with team IDs is resolved and exported."))
+		}
 	}
 
 	findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, progress)...)
@@ -1734,6 +1853,48 @@ func progressEnd(progress *progressTracker) {
 	if progress != nil {
 		progress.End()
 	}
+}
+
+func issueTeamCorrectionsInScope(cfg Config) bool {
+	if cfg.IssueTeamIDsInScopeSet {
+		return cfg.IssueTeamIDsInScope
+	}
+	return true
+}
+
+func targetAuthDiagnosticFinding(cfg Config) *Finding {
+	client, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie)
+	if err != nil {
+		finding := newFinding(SeverityWarning, "target_auth_diagnostic_failed", fmt.Sprintf("Could not create target Jira client for auth diagnostic: %v", err))
+		return &finding
+	}
+	user, err := client.CurrentUser()
+	if err != nil {
+		finding := newFinding(SeverityWarning, "target_auth_diagnostic_failed", fmt.Sprintf("Target core Jira auth diagnostic failed at /rest/api/2/myself: %v", err))
+		return &finding
+	}
+
+	identity := jiraUserIdentity(*user)
+	finding := newFinding(SeverityInfo, "target_auth_diagnostic", fmt.Sprintf("Target core Jira /rest/api/2/myself authenticated as %s; the target Teams/JPO 403 happened after authentication. Verify this exact user has Advanced Roadmaps and team-management access on %s.", identity, normalizeInstanceBaseURL(cfg.TargetBaseURL)))
+	return &finding
+}
+
+func jiraUserIdentity(user CoreJiraUser) string {
+	parts := make([]string, 0, 4)
+	if strings.TrimSpace(user.Name) != "" {
+		parts = append(parts, fmt.Sprintf("name=%q", user.Name))
+	}
+	if strings.TrimSpace(user.Key) != "" && user.Key != user.Name {
+		parts = append(parts, fmt.Sprintf("key=%q", user.Key))
+	}
+	if strings.TrimSpace(user.DisplayName) != "" {
+		parts = append(parts, fmt.Sprintf("displayName=%q", user.DisplayName))
+	}
+	parts = append(parts, fmt.Sprintf("active=%t", user.Active))
+	if len(parts) == 0 {
+		return "an unnamed active Jira user"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func buildTeamMappings(cfg Config, sourceTeams, targetTeams []TeamDTO, sourcePlans []PlanDTO, planMappings []PlanMapping) ([]TeamMapping, []Finding) {
@@ -2109,22 +2270,24 @@ func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrat
 	var actions []Action
 	var findings []Finding
 
-	issueActions, issueFindings, issueResults := applyPostMigrationIssueCorrections(client, state)
-	actions = append(actions, issueActions...)
-	findings = append(findings, issueFindings...)
-	state.IssueUpdateResults = issueResults
-	if path, err := writePostMigrationIssueUpdateResultsExport(cfg, issueResults); err != nil {
-		findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_results_export_failed", err.Error()))
-	} else if path != "" {
-		artifact := Artifact{
-			Key:   "post_migrate_issue_update_results",
-			Label: "Post-migration issue update results",
-			Path:  path,
-			Count: len(issueResults),
+	if issueTeamCorrectionsInScope(cfg) {
+		issueActions, issueFindings, issueResults := applyPostMigrationIssueCorrections(client, state)
+		actions = append(actions, issueActions...)
+		findings = append(findings, issueFindings...)
+		state.IssueUpdateResults = issueResults
+		if path, err := writePostMigrationIssueUpdateResultsExport(cfg, issueResults); err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_results_export_failed", err.Error()))
+		} else if path != "" {
+			artifact := Artifact{
+				Key:   "post_migrate_issue_update_results",
+				Label: "Post-migration issue update results",
+				Path:  path,
+				Count: len(issueResults),
+			}
+			state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+			actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+			findings = append(findings, newFinding(SeverityInfo, "post_migrate_issue_results_export_generated", fmt.Sprintf("Generated post-migration issue update results: %s", path)))
 		}
-		state.Artifacts = replaceArtifact(state.Artifacts, artifact)
-		actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
-		findings = append(findings, newFinding(SeverityInfo, "post_migrate_issue_results_export_generated", fmt.Sprintf("Generated post-migration issue update results: %s", path)))
 	}
 
 	parentLinkActions, parentLinkFindings, parentLinkResults := applyPostMigrationParentLinkCorrections(client, state)
@@ -2340,21 +2503,15 @@ func applyPostMigrationParentLinkCorrections(client *jiraClient, state *migratio
 		result.CurrentParentIssueID = currentParentID
 		result.CurrentParentIssueKey = currentParentKey
 
-		if currentParentID != comparison.SourceParentIssueID && (comparison.SourceParentIssueKey == "" || currentParentKey != comparison.SourceParentIssueKey) {
-			if currentParentID == comparison.TargetParentIssueID || (currentParentID == "" && currentParentKey != "" && currentParentKey == comparison.TargetParentIssueKey) {
-				result.Status = "already_rewritten"
-				result.Message = "The target child issue already points to the mapped target parent issue"
-				results = append(results, result)
-				continue
-			}
-			result.Status = "source_parent_not_found_in_target_issue"
-			result.Message = "The current target child issue does not point to the expected source parent reference"
+		if currentParentID == comparison.TargetParentIssueID || (currentParentID == "" && currentParentKey != "" && currentParentKey == comparison.TargetParentIssueKey) {
+			result.Status = "already_rewritten"
+			result.Message = "The target child issue already points to the mapped target parent issue"
 			results = append(results, result)
 			continue
 		}
 
 		if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{
-			comparison.TargetParentLinkFieldID: map[string]any{"id": comparison.TargetParentIssueID},
+			comparison.TargetParentLinkFieldID: comparison.TargetParentIssueKey,
 		}); err != nil {
 			result.Status = "update_failed"
 			result.Message = fmt.Sprintf("Could not update target issue Parent Link: %v", err)
@@ -3291,55 +3448,55 @@ func mappedTargetTeamIDsForExport(raw string, targetTeamIDs map[string]string) [
 	return out
 }
 
-func loadTeams(baseURL, username, password, file string, progress func(current, total int)) ([]TeamDTO, error) {
+func loadTeams(baseURL, username, password, cookie, file string, progress func(current, total int)) ([]TeamDTO, error) {
 	if file != "" {
 		return loadJSONFile[TeamDTO](file)
 	}
-	client, err := newJiraClient(baseURL, username, password)
+	client, err := newJiraClientWithCookie(baseURL, username, password, cookie)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListTeams(progress)
 }
 
-func loadPersons(baseURL, username, password, file string, progress func(current, total int)) ([]PersonDTO, error) {
+func loadPersons(baseURL, username, password, cookie, file string, progress func(current, total int)) ([]PersonDTO, error) {
 	if file != "" {
 		return loadJSONFile[PersonDTO](file)
 	}
-	client, err := newJiraClient(baseURL, username, password)
+	client, err := newJiraClientWithCookie(baseURL, username, password, cookie)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListPersons(progress)
 }
 
-func loadResources(baseURL, username, password, file string, progress func(current, total int)) ([]ResourceDTO, error) {
+func loadResources(baseURL, username, password, cookie, file string, progress func(current, total int)) ([]ResourceDTO, error) {
 	if file != "" {
 		return loadJSONFile[ResourceDTO](file)
 	}
-	client, err := newJiraClient(baseURL, username, password)
+	client, err := newJiraClientWithCookie(baseURL, username, password, cookie)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListResources(progress)
 }
 
-func loadPrograms(baseURL, username, password string, progress func(current, total int)) ([]ProgramDTO, error) {
+func loadPrograms(baseURL, username, password, cookie string, progress func(current, total int)) ([]ProgramDTO, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, nil
 	}
-	client, err := newJiraClient(baseURL, username, password)
+	client, err := newJiraClientWithCookie(baseURL, username, password, cookie)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListPrograms(progress)
 }
 
-func loadPlans(baseURL, username, password string, progress func(current, total int)) ([]PlanDTO, error) {
+func loadPlans(baseURL, username, password, cookie string, progress func(current, total int)) ([]PlanDTO, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, nil
 	}
-	client, err := newJiraClient(baseURL, username, password)
+	client, err := newJiraClientWithCookie(baseURL, username, password, cookie)
 	if err != nil {
 		return nil, err
 	}
@@ -4385,15 +4542,15 @@ func exportIssuesWithTeamsField(cfg Config, client *jiraClient, sourceTeams []Te
 	return selection, rows, detailedPath, importPath, findings
 }
 
-func exportIssuesWithParentLink(cfg Config, client *jiraClient, progress *progressTracker) (JiraField, []ParentLinkRow, string, []Finding) {
+func exportIssuesWithParentLink(cfg Config, client *jiraClient, progress *progressTracker) (JiraField, []ParentLinkRow, string, string, []Finding) {
 	fields, err := client.ListFields()
 	if err != nil {
-		return JiraField{}, nil, "", []Finding{newFinding(SeverityWarning, "parent_link_field_discovery_failed", fmt.Sprintf("Could not load Jira fields: %v", err))}
+		return JiraField{}, nil, "", "", []Finding{newFinding(SeverityWarning, "parent_link_field_discovery_failed", fmt.Sprintf("Could not load Jira fields: %v", err))}
 	}
 
 	field, findings := selectParentLinkField(fields)
 	if field == nil {
-		return JiraField{}, nil, "", findings
+		return JiraField{}, nil, "", "", findings
 	}
 
 	jql := scopedIssueJQL(cfg.IssueProjectScope, fmt.Sprintf(`type = Epic AND "%s" is not EMPTY`, field.Name))
@@ -4404,24 +4561,39 @@ func exportIssuesWithParentLink(cfg Config, client *jiraClient, progress *progre
 	})
 	if err != nil {
 		findings = append(findings, newFinding(SeverityWarning, "parent_link_issue_search_failed", fmt.Sprintf("Could not search issues for parent link field %s: %v", field.ID, err)))
-		return *field, nil, "", findings
+		return *field, nil, "", "", findings
 	}
 
-	rows, rowFindings := buildParentLinkRows(client, issues, *field)
+	scopeProjects, err := normalizeIssueProjectScope(cfg.IssueProjectScope)
+	if err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "parent_link_scope_invalid", fmt.Sprintf("Could not apply Parent Link parent project scope: %v", err)))
+	}
+
+	rows, outOfScopeRows, rowFindings := buildParentLinkRows(client, issues, *field, scopeProjects)
 	findings = append(findings, rowFindings...)
+	outOfScopePath := ""
+	if len(outOfScopeRows) > 0 {
+		path, err := writeParentLinkOutOfScopeExport(cfg, outOfScopeRows)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "parent_link_out_of_scope_export_failed", err.Error()))
+		} else if path != "" {
+			outOfScopePath = path
+			findings = append(findings, newFinding(SeverityInfo, "parent_link_out_of_scope_exported", fmt.Sprintf("Exported %d issues with out-of-scope Parent Link parents to %s", len(outOfScopeRows), path)))
+		}
+	}
 	if len(rows) == 0 {
 		findings = append(findings, newFinding(SeverityInfo, "parent_link_no_issues", fmt.Sprintf("No issues found with a value for %s", field.Name)))
-		return *field, rows, "", findings
+		return *field, rows, "", outOfScopePath, findings
 	}
 
 	exportPath, err := writeParentLinkExport(cfg, rows)
 	if err != nil {
 		findings = append(findings, newFinding(SeverityWarning, "parent_link_export_failed", err.Error()))
-		return *field, rows, "", findings
+		return *field, rows, "", outOfScopePath, findings
 	}
 
 	findings = append(findings, newFinding(SeverityInfo, "parent_link_exported", fmt.Sprintf("Exported %d issues with a value for %s to %s", len(rows), field.Name, exportPath)))
-	return *field, rows, exportPath, findings
+	return *field, rows, exportPath, outOfScopePath, findings
 }
 
 func selectTeamsField(fields []JiraField) (*TeamsFieldSelection, []Finding) {
@@ -4604,10 +4776,12 @@ func buildIssueTeamRows(issues []JiraIssue, field JiraField, sourceTeams []TeamD
 	return rows
 }
 
-func buildParentLinkRows(client *jiraClient, issues []JiraIssue, field JiraField) ([]ParentLinkRow, []Finding) {
+func buildParentLinkRows(client *jiraClient, issues []JiraIssue, field JiraField, scopeProjects []string) ([]ParentLinkRow, []ParentLinkRow, []Finding) {
 	rows := make([]ParentLinkRow, 0, len(issues))
+	outOfScopeRows := make([]ParentLinkRow, 0)
 	findings := make([]Finding, 0)
 	parentCache := map[string]JiraIssue{}
+	parentScope := projectScopeSet(scopeProjects)
 
 	for _, issue := range issues {
 		ref := extractParentIssueReference(issue.Fields[field.ID])
@@ -4638,7 +4812,7 @@ func buildParentLinkRows(client *jiraClient, issues []JiraIssue, field JiraField
 			parentSummary = rawSummary
 		}
 
-		rows = append(rows, ParentLinkRow{
+		row := ParentLinkRow{
 			IssueKey:               issue.Key,
 			IssueID:                issue.ID,
 			ProjectKey:             projectKey,
@@ -4650,10 +4824,33 @@ func buildParentLinkRows(client *jiraClient, issues []JiraIssue, field JiraField
 			SourceParentIssueKey:   nonEmptyString(ref.key, parentIssue.Key),
 			SourceParentSummary:    parentSummary,
 			SourceParentProjectKey: parentProjectKey,
-		})
+		}
+		if len(parentScope) > 0 {
+			if _, ok := parentScope[strings.ToUpper(strings.TrimSpace(parentProjectKey))]; !ok {
+				outOfScopeRows = append(outOfScopeRows, row)
+				continue
+			}
+		}
+
+		rows = append(rows, row)
 	}
 
-	return rows, findings
+	return rows, outOfScopeRows, findings
+}
+
+func projectScopeSet(projects []string) map[string]struct{} {
+	if len(projects) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(projects))
+	for _, project := range projects {
+		project = strings.ToUpper(strings.TrimSpace(project))
+		if project == "" {
+			continue
+		}
+		out[project] = struct{}{}
+	}
+	return out
 }
 
 func issueProjectDetails(fields map[string]any) (string, string, string) {
@@ -4844,6 +5041,47 @@ func writeParentLinkExport(cfg Config, rows []ParentLinkRow) (string, error) {
 		cfg,
 		"issues-with-parent-link.pre-migration.csv",
 		[]string{"Issue Key", "Issue ID", "Project Key", "Project Name", "Project Type", "Summary", "Parent Link Field ID", "Source Parent Issue ID", "Source Parent Issue Key", "Source Parent Summary", "Source Parent Project Key"},
+		records,
+	)
+}
+
+func writeParentLinkFieldExport(cfg Config, name string, row ParentLinkFieldRow) (string, error) {
+	if strings.TrimSpace(row.FieldID) == "" {
+		return "", nil
+	}
+	return writeCSVExport(
+		cfg,
+		name,
+		[]string{"Field ID", "Field Name", "Schema Custom", "Schema Type"},
+		[][]string{{row.FieldID, row.FieldName, row.SchemaCustom, row.SchemaType}},
+	)
+}
+
+func writeParentLinkOutOfScopeExport(cfg Config, rows []ParentLinkRow) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	records := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		records = append(records, []string{
+			row.IssueKey,
+			row.IssueID,
+			row.ProjectKey,
+			row.ProjectName,
+			row.ProjectType,
+			row.Summary,
+			row.ParentLinkFieldID,
+			row.SourceParentIssueID,
+			row.SourceParentIssueKey,
+			row.SourceParentSummary,
+			row.SourceParentProjectKey,
+			"parent issue project is outside issue project scope",
+		})
+	}
+	return writeCSVExport(
+		cfg,
+		"issues-with-parent-link.out-of-scope.pre-migration.csv",
+		[]string{"Issue Key", "Issue ID", "Project Key", "Project Name", "Project Type", "Summary", "Parent Link Field ID", "Source Parent Issue ID", "Source Parent Issue Key", "Source Parent Summary", "Source Parent Project Key", "Reason"},
 		records,
 	)
 }

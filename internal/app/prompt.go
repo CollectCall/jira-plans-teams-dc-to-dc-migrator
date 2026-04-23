@@ -394,6 +394,12 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 		}
 	}
 
+	if runsPostMigratePhase(cfg.Command, cfg.Phase) {
+		if err := configurePostMigrationCorrectionScopesForWizard(wizard, cfg); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -449,7 +455,7 @@ func sourceNeedsAuth(cfg Config) bool {
 	if canUsePreparedSourceArtifacts(cfg) {
 		return false
 	}
-	return strings.TrimSpace(cfg.SourceBaseURL) != "" && (strings.TrimSpace(cfg.SourceUsername) == "" || strings.TrimSpace(cfg.SourcePassword) == "")
+	return strings.TrimSpace(cfg.SourceBaseURL) != "" && strings.TrimSpace(cfg.SourceCookie) == "" && (strings.TrimSpace(cfg.SourceUsername) == "" || strings.TrimSpace(cfg.SourcePassword) == "")
 }
 
 func canUsePreparedSourceArtifacts(cfg Config) bool {
@@ -457,7 +463,7 @@ func canUsePreparedSourceArtifacts(cfg Config) bool {
 }
 
 func targetNeedsAuth(cfg Config) bool {
-	return strings.TrimSpace(cfg.TargetBaseURL) != "" && (strings.TrimSpace(cfg.TargetUsername) == "" || strings.TrimSpace(cfg.TargetPassword) == "")
+	return strings.TrimSpace(cfg.TargetBaseURL) != "" && strings.TrimSpace(cfg.TargetCookie) == "" && (strings.TrimSpace(cfg.TargetUsername) == "" || strings.TrimSpace(cfg.TargetPassword) == "")
 }
 
 func runConfigInitWizard(cfg Config) error {
@@ -623,13 +629,6 @@ func runConfigInitWizard(cfg Config) error {
 		return err
 	}
 	cfg.IssueProjectScope = issueProjectScope
-
-	if err := configureFilterTeamIDScope(wizard, &cfg); err != nil {
-		return err
-	}
-	if err := configureParentLinkScope(wizard, &cfg); err != nil {
-		return err
-	}
 
 	setCurrent, err := wizard.choice(wizardField{
 		Label:       "Set as current profile",
@@ -896,6 +895,67 @@ func defaultFilterTeamDataSource(cfg Config) string {
 	return filterDataSourceDatabaseCSV
 }
 
+func configurePostMigrationCorrectionScopes(wizard *wizardContext, cfg *Config) error {
+	choice, err := wizard.choice(wizardField{
+		Label:       "Post-migrate correction types",
+		Description: "Choose which Jira correction families should be prepared and applied by pre-/post-migrate.",
+		InputHelp:   "Type the number of your choice and press Enter.",
+		ArtifactInfo: strings.Join([]string{
+			"all three: issue Team-field IDs, Parent Link references, and filter JQL team IDs.",
+			"Individual choices are useful for focused testing.",
+			"skip: do not prepare Jira issue/filter correction artifacts.",
+		}, " "),
+		Default: "skip",
+	}, []string{"all three", "issue/team only", "parent link only", "filter only", "skip"})
+	if err != nil {
+		return err
+	}
+
+	cfg.IssueTeamIDsInScope = choice == "all three" || choice == "issue/team only"
+	cfg.IssueTeamIDsInScopeSet = true
+	cfg.ParentLinkInScope = choice == "all three" || choice == "parent link only"
+	cfg.ParentLinkInScopeSet = true
+	cfg.FilterTeamIDsInScope = choice == "all three" || choice == "filter only"
+	cfg.FilterTeamIDsInScopeSet = true
+
+	if !cfg.FilterTeamIDsInScope {
+		cfg.FilterDataSource = ""
+		cfg.FilterScriptRunnerInstalled = false
+		cfg.FilterScriptRunnerEndpoint = ""
+		return nil
+	}
+
+	return configureFilterTeamIDSource(wizard, cfg)
+}
+
+func configurePostMigrationCorrectionScopesForWizard(wizard *wizardContext, cfg *Config) error {
+	if err := configurePostMigrationCorrectionScopes(wizard, cfg); err != nil {
+		return err
+	}
+	if (issueTeamCorrectionsInScope(*cfg) || cfg.ParentLinkInScope) && strings.TrimSpace(cfg.IssueProjectScope) == "" {
+		value, err := wizard.value(wizardField{
+			Label:        "Issue correction project scope",
+			Description:  "Choose which Jira projects should be in scope for issue-based correction exports and post-migrate rewrites.",
+			InputHelp:    "Type all, or a comma-separated list like ABC,DEF.",
+			ArtifactInfo: "This scope is applied to issue/team and Parent Link correction flows. Filters are not project-scoped.",
+			Default:      nonEmptyDefault(cfg.IssueProjectScope, "all"),
+		})
+		if err != nil {
+			return err
+		}
+		cfg.IssueProjectScope = value
+	}
+	return nil
+}
+
+func promptPostMigrationCorrectionScopes(cfg *Config) error {
+	if !isInteractiveTerminal() {
+		return nil
+	}
+	wizard := newWizard("Teams Migrator", "Post-migrate corrections")
+	return configurePostMigrationCorrectionScopesForWizard(wizard, cfg)
+}
+
 func configureFilterTeamIDScope(wizard *wizardContext, cfg *Config) error {
 	inScope, err := wizard.choice(wizardField{
 		Label:        "Filters using team IDs in scope",
@@ -917,6 +977,10 @@ func configureFilterTeamIDScope(wizard *wizardContext, cfg *Config) error {
 		return nil
 	}
 
+	return configureFilterTeamIDSource(wizard, cfg)
+}
+
+func configureFilterTeamIDSource(wizard *wizardContext, cfg *Config) error {
 	wizard.noteLines([]string{
 		"Jira does not provide a generic filter-search REST endpoint that can reliably find all filters whose JQL uses team IDs.",
 		"For full coverage, use either a ScriptRunner custom REST endpoint on the source Jira instance or a CSV produced from a database query.",
@@ -1066,6 +1130,7 @@ func profileSummary(cfg Config) string {
 	lines = append(lines, fmt.Sprintf("Output dir: %s", cfg.OutputDir))
 	lines = append(lines, fmt.Sprintf("Team scope: %s", cfg.TeamScope))
 	lines = append(lines, fmt.Sprintf("Issue correction project scope: %s", nonEmptyDefault(cfg.IssueProjectScope, "all")))
+	lines = append(lines, fmt.Sprintf("Issue/team corrections in scope: %t", cfg.IssueTeamIDsInScope))
 	lines = append(lines, fmt.Sprintf("Team-ID filter updates in scope: %t", cfg.FilterTeamIDsInScope))
 	lines = append(lines, fmt.Sprintf("Parent Link corrections in scope: %t", cfg.ParentLinkInScope))
 	if cfg.FilterTeamIDsInScope {

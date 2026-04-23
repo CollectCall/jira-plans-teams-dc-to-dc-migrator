@@ -1466,13 +1466,13 @@ func TestPreparePostMigrationTargetParentLinkArtifactsWritesSnapshotAndCompariso
 			]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search" && strings.Contains(r.URL.Query().Get("jql"), `"ABC-1"`):
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"10001","key":"ABC-1","fields":{"summary":"Child issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_19999":{"id":"5001"}}}]}`))
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"10001","key":"ABC-1","fields":{"summary":"Child issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_19999":{"id":"7001"}}}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search" && strings.Contains(r.URL.Query().Get("jql"), `"INIT-1"`):
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"6001","key":"INIT-1","fields":{"summary":"Parent issue","project":{"key":"INIT","name":"Initiatives","projectTypeKey":"software"}}}]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/5001":
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/7001":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"5001","key":"INIT-1","fields":{"summary":"Parent issue","project":{"key":"INIT","name":"Initiatives","projectTypeKey":"software"}}}`))
+			_, _ = w.Write([]byte(`{"id":"7001","key":"OTHER-1","fields":{"summary":"Different parent issue","project":{"key":"OTHER","name":"Other Project","projectTypeKey":"software"}}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1519,7 +1519,7 @@ func TestPreparePostMigrationTargetParentLinkArtifactsWritesSnapshotAndCompariso
 	snapshotRecords := readCSVRecords(t, snapshotPath)
 	wantSnapshot := [][]string{
 		{"Issue Key", "Issue ID", "Project Key", "Project Name", "Project Type", "Summary", "Target Parent Link Field ID", "Current Parent Issue ID", "Current Parent Issue Key"},
-		{"ABC-1", "10001", "ABC", "Demo Project", "software", "Child issue", "customfield_19999", "5001", "INIT-1"},
+		{"ABC-1", "10001", "ABC", "Demo Project", "software", "Child issue", "customfield_19999", "7001", "OTHER-1"},
 	}
 	if !reflect.DeepEqual(snapshotRecords, wantSnapshot) {
 		t.Fatalf("unexpected target parent-link snapshot CSV:\nwant: %#v\ngot:  %#v", wantSnapshot, snapshotRecords)
@@ -1532,10 +1532,70 @@ func TestPreparePostMigrationTargetParentLinkArtifactsWritesSnapshotAndCompariso
 	comparisonRecords := readCSVRecords(t, comparisonPath)
 	wantComparison := [][]string{
 		{"Issue Key", "Issue ID", "Project Key", "Project Name", "Project Type", "Summary", "Source Parent Link Field ID", "Target Parent Link Field ID", "Source Parent Issue ID", "Source Parent Issue Key", "Target Parent Issue ID", "Target Parent Issue Key", "Current Parent Issue ID", "Current Parent Issue Key", "Status", "Reason"},
-		{"ABC-1", "10001", "ABC", "Demo Project", "software", "Child issue", "customfield_16605", "customfield_19999", "5001", "INIT-1", "6001", "INIT-1", "5001", "INIT-1", "ready", ""},
+		{"ABC-1", "10001", "ABC", "Demo Project", "software", "Child issue", "customfield_16605", "customfield_19999", "5001", "INIT-1", "6001", "INIT-1", "7001", "OTHER-1", "ready", ""},
 	}
 	if !reflect.DeepEqual(comparisonRecords, wantComparison) {
 		t.Fatalf("unexpected parent-link comparison CSV:\nwant: %#v\ngot:  %#v", wantComparison, comparisonRecords)
+	}
+}
+
+func TestBuildParentLinkRowsSkipsParentsOutsideProjectScope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/IN-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"20001","key":"IN-1","fields":{"summary":"In-scope parent","project":{"key":"IN","name":"In Scope","projectTypeKey":"software"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/OUT-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"30001","key":"OUT-1","fields":{"summary":"Out-of-scope parent","project":{"key":"OUT","name":"Out Scope","projectTypeKey":"software"}}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("new Jira client: %v", err)
+	}
+
+	field := JiraField{ID: "customfield_16600", Name: "Parent Link", Custom: true}
+	issues := []JiraIssue{
+		{
+			ID:  "10001",
+			Key: "TP-4",
+			Fields: map[string]any{
+				"summary":           "In-scope child",
+				"project":           map[string]any{"key": "TP", "name": "Test Project", "projectTypeKey": "software"},
+				"customfield_16600": map[string]any{"key": "IN-1", "id": "20001"},
+			},
+		},
+		{
+			ID:  "10002",
+			Key: "TP-5",
+			Fields: map[string]any{
+				"summary":           "Child with out-of-scope parent",
+				"project":           map[string]any{"key": "TP", "name": "Test Project", "projectTypeKey": "software"},
+				"customfield_16600": map[string]any{"key": "OUT-1", "id": "30001"},
+			},
+		},
+	}
+
+	rows, outOfScopeRows, findings := buildParentLinkRows(client, issues, field, []string{"TP", "IN"})
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected only the in-scope parent row, got %#v", rows)
+	}
+	if rows[0].IssueKey != "TP-4" || rows[0].SourceParentIssueKey != "IN-1" {
+		t.Fatalf("unexpected retained row: %#v", rows[0])
+	}
+	if len(outOfScopeRows) != 1 {
+		t.Fatalf("expected one reference-only out-of-scope row, got %#v", outOfScopeRows)
+	}
+	if outOfScopeRows[0].IssueKey != "TP-5" || outOfScopeRows[0].SourceParentProjectKey != "OUT" {
+		t.Fatalf("unexpected out-of-scope row: %#v", outOfScopeRows[0])
 	}
 }
 
@@ -1803,9 +1863,24 @@ func TestJiraAPIErrorFormatsForbiddenClearly(t *testing.T) {
 		Message:    "<html><title>Forbidden</title></html>",
 	}).Error()
 
-	want := "GET /rest/api/2/search returned 403: Jira authenticated the request but denied access; check the permissions for this instance"
+	want := "GET /rest/api/2/search returned 403: Jira denied the request: <html><title>Forbidden</title></html>"
 	if err != want {
 		t.Fatalf("unexpected forbidden error message:\nwant: %q\ngot:  %q", want, err)
+	}
+}
+
+func TestJiraAPIErrorFormatsForbiddenLoginReason(t *testing.T) {
+	err := (&jiraAPIError{
+		Method:      http.MethodGet,
+		Endpoint:    "/rest/api/2/myself",
+		StatusCode:  http.StatusForbidden,
+		Message:     "Login denied",
+		LoginReason: "AUTHENTICATION_DENIED",
+	}).Error()
+
+	want := "GET /rest/api/2/myself returned 403: Jira denied the request (AUTHENTICATION_DENIED): Login denied"
+	if err != want {
+		t.Fatalf("unexpected forbidden login reason error message:\nwant: %q\ngot:  %q", want, err)
 	}
 }
 
@@ -2002,19 +2077,19 @@ func TestExecuteMigrationWithStateAppliesPostMigrationParentLinkCorrections(t *t
 			_, _ = w.Write([]byte(`[{"id":"customfield_19999","name":"Parent Link","custom":true,"schema":{"custom":"com.atlassian.jpo:jpo-custom-field-parent"}}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search" && strings.Contains(r.URL.Query().Get("jql"), `"ABC-1"`):
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"10001","key":"ABC-1","fields":{"summary":"Child issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_19999":{"id":"5001"}}}]}`))
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"10001","key":"ABC-1","fields":{"summary":"Child issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_19999":{"id":"7001"}}}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search" && strings.Contains(r.URL.Query().Get("jql"), `"INIT-1"`):
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"6001","key":"INIT-1","fields":{"summary":"Parent issue","project":{"key":"INIT","name":"Initiatives","projectTypeKey":"software"}}}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/ABC-1":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"10001","key":"ABC-1","fields":{"summary":"Child issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_19999":{"id":"5001"}}}`))
+			_, _ = w.Write([]byte(`{"id":"10001","key":"ABC-1","fields":{"summary":"Child issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_19999":{"id":"7001"}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/INIT-1":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"6001","key":"INIT-1","fields":{"summary":"Parent issue","project":{"key":"INIT","name":"Initiatives","projectTypeKey":"software"}}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/5001":
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/7001":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"5001","key":"INIT-1","fields":{"summary":"Parent issue","project":{"key":"INIT","name":"Initiatives","projectTypeKey":"software"}}}`))
+			_, _ = w.Write([]byte(`{"id":"7001","key":"OTHER-1","fields":{"summary":"Different parent issue","project":{"key":"OTHER","name":"Other Project","projectTypeKey":"software"}}}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/rest/api/2/issue/ABC-1":
 			data, err := io.ReadAll(r.Body)
 			if err != nil {
@@ -2067,8 +2142,8 @@ func TestExecuteMigrationWithStateAppliesPostMigrationParentLinkCorrections(t *t
 	if len(updateBodies) != 1 {
 		t.Fatalf("expected exactly one parent-link update body, got %d", len(updateBodies))
 	}
-	if !strings.Contains(updateBodies[0], `"customfield_19999":{"id":"6001"}`) {
-		t.Fatalf("expected parent-link update payload to contain mapped target parent ID, got %s", updateBodies[0])
+	if !strings.Contains(updateBodies[0], `"customfield_19999":"INIT-1"`) {
+		t.Fatalf("expected parent-link update payload to contain mapped target parent key, got %s", updateBodies[0])
 	}
 
 	resultsPath := artifactPathByKey(state.Artifacts, "post_migrate_parent_link_update_results")

@@ -2133,7 +2133,8 @@ func applyPostMigrationIssueCorrections(client *jiraClient, state *migrationStat
 			continue
 		}
 
-		if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: rewrittenRaw}); err != nil {
+		updateValue := issueTeamFieldUpdateValue(raw, rewrittenRaw)
+		if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: updateValue}); err != nil {
 			result.Status = "update_failed"
 			result.Message = fmt.Sprintf("Could not update target issue: %v", err)
 			results = append(results, result)
@@ -2587,6 +2588,22 @@ func rewriteTeamFieldIDs(raw any, replacements map[string]string) (any, bool) {
 		return out, true
 	default:
 		return v, false
+	}
+}
+
+func issueTeamFieldUpdateValue(raw, rewritten any) any {
+	rawIDs := extractTeamFieldIDs(raw)
+	rewrittenIDs := extractTeamFieldIDs(rewritten)
+	if len(rawIDs) == 1 && len(rewrittenIDs) == 1 && rawIDs[0] != rewrittenIDs[0] {
+		return rewrittenIDs[0]
+	}
+	switch v := rewritten.(type) {
+	case float64:
+		return strconv.FormatInt(int64(v), 10)
+	case string:
+		return v
+	default:
+		return rewritten
 	}
 }
 

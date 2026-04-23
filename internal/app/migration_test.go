@@ -1465,6 +1465,121 @@ func TestGetIssueAndUpdateIssueFields(t *testing.T) {
 	}
 }
 
+func TestApplyPostMigrationIssueCorrectionsSendsScalarTeamFieldAsString(t *testing.T) {
+	var updateBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/TP-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"10001","key":"TP-1","fields":{"customfield_16604":4}}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/rest/api/2/issue/TP-1":
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read update body: %v", err)
+			}
+			updateBody = string(data)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	state := migrationState{
+		TeamMappings: []TeamMapping{
+			{SourceTeamID: 4, TargetTeamID: "8", Decision: "merge"},
+		},
+		IssueComparisons: []PostMigrationIssueComparisonRow{
+			{
+				IssueKey:             "TP-1",
+				SourceTeamsFieldID:   "customfield_16604",
+				TargetTeamsFieldID:   "customfield_16604",
+				SourceTeamIDs:        "4",
+				TargetTeamIDs:        "8",
+				CurrentTargetTeamIDs: "4",
+				Status:               "ready",
+			},
+		},
+	}
+
+	actions, findings, results := applyPostMigrationIssueCorrections(client, &state)
+	for _, finding := range findings {
+		if finding.Severity == SeverityError || finding.Severity == SeverityWarning {
+			t.Fatalf("unexpected finding: %#v", findings)
+		}
+	}
+	if len(results) != 1 || results[0].Status != "updated" {
+		t.Fatalf("expected one updated result, got %#v", results)
+	}
+	if !containsAction(actions, "post_migrate_issue_update", "updated") {
+		t.Fatalf("expected issue update action, got %#v", actions)
+	}
+	if !strings.Contains(updateBody, `"customfield_16604":"8"`) {
+		t.Fatalf("expected scalar team field update payload to use a string value, got %s", updateBody)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsSendsSingleObjectTeamFieldAsString(t *testing.T) {
+	var updateBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/TP-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"10001","key":"TP-1","fields":{"customfield_16604":{"id":4,"title":"Team 1"}}}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/rest/api/2/issue/TP-1":
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read update body: %v", err)
+			}
+			updateBody = string(data)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	state := migrationState{
+		TeamMappings: []TeamMapping{
+			{SourceTeamID: 4, TargetTeamID: "8", Decision: "merge"},
+		},
+		IssueComparisons: []PostMigrationIssueComparisonRow{
+			{
+				IssueKey:             "TP-1",
+				SourceTeamsFieldID:   "customfield_16604",
+				TargetTeamsFieldID:   "customfield_16604",
+				SourceTeamIDs:        "4",
+				TargetTeamIDs:        "8",
+				CurrentTargetTeamIDs: "4",
+				Status:               "ready",
+			},
+		},
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(client, &state)
+	for _, finding := range findings {
+		if finding.Severity == SeverityError || finding.Severity == SeverityWarning {
+			t.Fatalf("unexpected finding: %#v", findings)
+		}
+	}
+	if len(results) != 1 || results[0].Status != "updated" {
+		t.Fatalf("expected one updated result, got %#v", results)
+	}
+	if !strings.Contains(updateBody, `"customfield_16604":"8"`) {
+		t.Fatalf("expected single object team field update payload to use a string value, got %s", updateBody)
+	}
+}
+
 func TestJiraClientRetriesRateLimitedRequests(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1719,7 +1834,7 @@ func TestExecuteMigrationWithStateAppliesPostMigrationCorrections(t *testing.T) 
 		}
 	}
 
-	if !strings.Contains(issueUpdateBody, `"customfield_18888":[{"id":142}]`) {
+	if !strings.Contains(issueUpdateBody, `"customfield_18888":"142"`) {
 		t.Fatalf("expected issue update payload to contain rewritten team ID, got %s", issueUpdateBody)
 	}
 	if !strings.Contains(filterUpdateBody, `"jql":"project = ABC AND Team = 142"`) {

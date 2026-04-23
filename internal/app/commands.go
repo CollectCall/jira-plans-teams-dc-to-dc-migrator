@@ -15,7 +15,7 @@ func runMigrate(cfg Config) Report {
 		return report
 	}
 
-	applyPhase := runsMigratePhase(cfg.Command, cfg.Phase) && !cfg.DryRun
+	applyPhase := (runsMigratePhase(cfg.Command, cfg.Phase) || runsPostMigratePhase(cfg.Command, cfg.Phase)) && !cfg.DryRun
 	state, findings, actions := executeMigration(cfg, applyPhase)
 	report = populateExecutionReport(report, state, findings, actions, "", "")
 	switch normalizeMigrationPhase(cfg.Phase) {

@@ -4569,7 +4569,10 @@ func exportIssuesWithParentLink(cfg Config, client *jiraClient, progress *progre
 		return JiraField{}, nil, "", "", findings
 	}
 
-	jql := scopedIssueJQL(cfg.IssueProjectScope, fmt.Sprintf(`type = Epic AND "%s" is not EMPTY`, field.Name))
+	parentLinkIssueTypes, typeFindings := resolveParentLinkIssueTypes(client)
+	findings = append(findings, typeFindings...)
+
+	jql := buildParentLinkIssueJQL(cfg.IssueProjectScope, field.Name, parentLinkIssueTypes)
 	issues, err := client.SearchIssues(jql, []string{"summary", "project", "projectType", field.ID}, func(current, total int) {
 		if progress != nil {
 			progress.UpdateCount(current, total)
@@ -4610,6 +4613,82 @@ func exportIssuesWithParentLink(cfg Config, client *jiraClient, progress *progre
 
 	findings = append(findings, newFinding(SeverityInfo, "parent_link_exported", fmt.Sprintf("Exported %d issues with a value for %s to %s", len(rows), field.Name, exportPath)))
 	return *field, rows, exportPath, outOfScopePath, findings
+}
+
+func resolveParentLinkIssueTypes(client *jiraClient) ([]string, []Finding) {
+	const epicName = "Epic"
+
+	issueTypes, err := client.ListIssueTypes()
+	if err != nil {
+		return []string{epicName}, []Finding{newFinding(SeverityWarning, "parent_link_issue_types_lookup_failed", fmt.Sprintf("Could not load Jira issue types for Parent Link recovery scope; falling back to %s only: %v", epicName, err))}
+	}
+
+	hierarchyLevels, err := client.ListHierarchyLevels(nil)
+	if err != nil {
+		return []string{epicName}, []Finding{newFinding(SeverityWarning, "parent_link_hierarchy_lookup_failed", fmt.Sprintf("Could not load Advanced Roadmaps hierarchy for Parent Link recovery scope; falling back to %s only: %v", epicName, err))}
+	}
+
+	issueTypeNamesByID := make(map[string]string, len(issueTypes))
+	for _, issueType := range issueTypes {
+		id := strings.TrimSpace(issueType.ID)
+		name := strings.TrimSpace(issueType.Name)
+		if id == "" || name == "" {
+			continue
+		}
+		issueTypeNamesByID[id] = name
+	}
+
+	epicLevelID := int64(-1)
+	for _, level := range hierarchyLevels {
+		if strings.EqualFold(strings.TrimSpace(level.Title), epicName) {
+			epicLevelID = level.ID
+			break
+		}
+		for _, issueTypeID := range level.IssueTypeIDs {
+			if strings.EqualFold(issueTypeNamesByID[strings.TrimSpace(issueTypeID)], epicName) {
+				epicLevelID = level.ID
+				break
+			}
+		}
+		if epicLevelID >= 0 {
+			break
+		}
+	}
+
+	if epicLevelID < 0 {
+		return []string{epicName}, []Finding{newFinding(SeverityWarning, "parent_link_hierarchy_epic_missing", fmt.Sprintf("Advanced Roadmaps hierarchy does not identify an %s level; falling back to %s only", epicName, epicName))}
+	}
+
+	names := []string{epicName}
+	seen := map[string]struct{}{strings.ToUpper(epicName): struct{}{}}
+	for _, level := range hierarchyLevels {
+		if level.ID <= epicLevelID {
+			continue
+		}
+		for _, issueTypeID := range level.IssueTypeIDs {
+			name := strings.TrimSpace(issueTypeNamesByID[strings.TrimSpace(issueTypeID)])
+			if name == "" {
+				continue
+			}
+			key := strings.ToUpper(name)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			names = append(names, name)
+		}
+	}
+
+	return names, nil
+}
+
+func buildParentLinkIssueJQL(scope, fieldName string, issueTypes []string) string {
+	typeClause := `type = Epic`
+	cleanIssueTypes := uniqueTrimmedStrings(issueTypes)
+	if len(cleanIssueTypes) > 0 {
+		typeClause = fmt.Sprintf("type IN (%s)", quoteJQLValues(cleanIssueTypes))
+	}
+	return scopedIssueJQL(scope, fmt.Sprintf(`%s AND "%s" is not EMPTY`, typeClause, fieldName))
 }
 
 func selectTeamsField(fields []JiraField) (*TeamsFieldSelection, []Finding) {

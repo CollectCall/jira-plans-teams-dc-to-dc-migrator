@@ -181,6 +181,22 @@ func (c *jiraClient) ListFields() ([]JiraField, error) {
 	return fields, nil
 }
 
+func (c *jiraClient) ListIssueTypes() ([]JiraIssueType, error) {
+	body, err := c.doCoreJSON(http.MethodGet, "/rest/api/2/issuetype", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var issueTypes []JiraIssueType
+	if err := json.Unmarshal(body, &issueTypes); err != nil {
+		return nil, err
+	}
+	return issueTypes, nil
+}
+
+func (c *jiraClient) ListHierarchyLevels(progress func(current, total int)) ([]HierarchyLevelDTO, error) {
+	return listJPOPaged[HierarchyLevelDTO](c, "/hierarchy", progress)
+}
+
 func (c *jiraClient) CurrentUser() (*CoreJiraUser, error) {
 	body, err := c.doCoreJSON(http.MethodGet, "/rest/api/2/myself", nil, nil)
 	if err != nil {

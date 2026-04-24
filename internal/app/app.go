@@ -147,6 +147,7 @@ func runInteractiveMigrateSession(cfg Config) int {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return ExitFailure
 	}
+	refreshInteractiveMigrateReferenceExportScopes(&cfg)
 
 	for {
 		switch normalizeMigrationPhase(cfg.Phase) {
@@ -205,6 +206,13 @@ func runInteractiveMigrateSession(cfg Config) int {
 			return ExitFailure
 		}
 	}
+}
+
+func refreshInteractiveMigrateReferenceExportScopes(cfg *Config) {
+	if cfg == nil || cfg.Command != "migrate" {
+		return
+	}
+	applyDefaultReferenceExportScopes(cfg)
 }
 
 func ensureInteractiveMigrateProfileSelected(cfg *Config) error {

@@ -119,6 +119,12 @@ type JiraField struct {
 	ClauseNames []string         `json:"clauseNames,omitempty"`
 }
 
+type JiraIssueType struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Subtask bool   `json:"subtask,omitempty"`
+}
+
 type JiraFieldSchema struct {
 	Type     string `json:"type,omitempty"`
 	Items    string `json:"items,omitempty"`
@@ -154,6 +160,12 @@ type JiraFilterUser struct {
 	Name        string `json:"name,omitempty"`
 	Key         string `json:"key,omitempty"`
 	DisplayName string `json:"displayName,omitempty"`
+}
+
+type HierarchyLevelDTO struct {
+	ID           int64    `json:"id"`
+	Title        string   `json:"title"`
+	IssueTypeIDs []string `json:"issueTypeIds"`
 }
 
 type JiraIssue struct {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -273,6 +274,86 @@ func TestParseConfigAcceptsIssueProjectScope(t *testing.T) {
 	}
 	if cfg.IssueProjectScope != "abc,DEF" {
 		t.Fatalf("expected issue project scope to be preserved from flags, got %q", cfg.IssueProjectScope)
+	}
+}
+
+func TestRefreshInteractiveMigrateReferenceExportScopesRecomputesAfterProfileLoad(t *testing.T) {
+	cfg := Config{
+		Command:   "migrate",
+		OutputDir: t.TempDir(),
+	}
+
+	applyDefaultReferenceExportScopes(&cfg)
+	if cfg.ParentLinkInScope {
+		t.Fatal("expected parent-link scope to start disabled before profile values are loaded")
+	}
+	if cfg.FilterTeamIDsInScope {
+		t.Fatal("expected filter scope to start disabled before profile values are loaded")
+	}
+
+	applySavedProfile(&cfg, SavedProfile{
+		SourceBaseURL:               "https://source.example.com/jira",
+		FilterDataSource:            filterDataSourceScriptRunner,
+		FilterScriptRunnerInstalled: true,
+	})
+	refreshInteractiveMigrateReferenceExportScopes(&cfg)
+
+	if !cfg.ParentLinkInScope || !cfg.ParentLinkInScopeSet {
+		t.Fatalf("expected parent-link scope to refresh after profile load, got %#v", cfg)
+	}
+	if !cfg.FilterTeamIDsInScope || !cfg.FilterTeamIDsInScopeSet {
+		t.Fatalf("expected filter scope to refresh after profile load, got %#v", cfg)
+	}
+}
+
+func TestConfigureInitCorrectionScopesUsesExplicitWizardChoices(t *testing.T) {
+	wizard := &wizardContext{
+		Title:  "Teams Migrator | Init",
+		Reader: bufio.NewReader(strings.NewReader("1\n1\n")),
+	}
+	cfg := Config{
+		SourceBaseURL:               "https://source.example.com/jira",
+		IssueTeamIDsInScope:         true,
+		IssueTeamIDsInScopeSet:      true,
+		ParentLinkInScope:           true,
+		FilterTeamIDsInScope:        true,
+		FilterDataSource:            filterDataSourceScriptRunner,
+		FilterScriptRunnerInstalled: true,
+	}
+
+	if err := configureInitCorrectionScopes(wizard, &cfg); err != nil {
+		t.Fatalf("configure init correction scopes: %v", err)
+	}
+	if cfg.ParentLinkInScope || !cfg.ParentLinkInScopeSet {
+		t.Fatalf("expected explicit no choice to disable parent-link scope, got %#v", cfg)
+	}
+	if cfg.FilterTeamIDsInScope || !cfg.FilterTeamIDsInScopeSet {
+		t.Fatalf("expected explicit no choice to disable filter scope, got %#v", cfg)
+	}
+	if cfg.FilterDataSource != "" || cfg.FilterScriptRunnerInstalled || cfg.FilterScriptRunnerEndpoint != "" {
+		t.Fatalf("expected filter source settings to clear when filter scope is disabled, got %#v", cfg)
+	}
+}
+
+func TestConfigureInitCorrectionScopesCanEnableParentLinkWithoutFilters(t *testing.T) {
+	wizard := &wizardContext{
+		Title:  "Teams Migrator | Init",
+		Reader: bufio.NewReader(strings.NewReader("2\n1\n")),
+	}
+	cfg := Config{
+		SourceBaseURL:          "https://source.example.com/jira",
+		IssueTeamIDsInScope:    true,
+		IssueTeamIDsInScopeSet: true,
+	}
+
+	if err := configureInitCorrectionScopes(wizard, &cfg); err != nil {
+		t.Fatalf("configure init correction scopes: %v", err)
+	}
+	if !cfg.ParentLinkInScope || !cfg.ParentLinkInScopeSet {
+		t.Fatalf("expected explicit yes choice to enable parent-link scope, got %#v", cfg)
+	}
+	if cfg.FilterTeamIDsInScope || !cfg.FilterTeamIDsInScopeSet {
+		t.Fatalf("expected explicit no choice to leave filter scope disabled, got %#v", cfg)
 	}
 }
 
@@ -1749,6 +1830,201 @@ func TestBuildParentLinkRowsSkipsParentsOutsideProjectScope(t *testing.T) {
 	}
 	if outOfScopeRows[0].IssueKey != "TP-5" || outOfScopeRows[0].SourceParentProjectKey != "OUT" {
 		t.Fatalf("unexpected out-of-scope row: %#v", outOfScopeRows[0])
+	}
+}
+
+func TestResolveParentLinkIssueTypesIncludesEpicAndHigherLevels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issuetype":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":"10000","name":"Epic"},
+				{"id":"10001","name":"Initiative"},
+				{"id":"10002","name":"Objective"}
+			]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/jpo-api/1.0/hierarchy" && r.URL.Query().Get("page") == "1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":1,"title":"Story","issueTypeIds":["10003"]},
+				{"id":2,"title":"Epic","issueTypeIds":["10000"]},
+				{"id":3,"title":"Initiative","issueTypeIds":["10001"]},
+				{"id":4,"title":"Objective","issueTypeIds":["10002"]}
+			]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/jpo-api/1.0/hierarchy" && r.URL.Query().Get("page") == "2":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Fatalf("unexpected request %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("new Jira client: %v", err)
+	}
+
+	issueTypes, findings := resolveParentLinkIssueTypes(client)
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+
+	want := []string{"Epic", "Initiative", "Objective"}
+	if !reflect.DeepEqual(issueTypes, want) {
+		t.Fatalf("unexpected issue types:\nwant: %#v\ngot:  %#v", want, issueTypes)
+	}
+}
+
+func TestResolveParentLinkIssueTypesFallsBackToEpicOnlyWhenNothingIsAboveEpic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issuetype":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":"10000","name":"Epic"},
+				{"id":"10003","name":"Story"}
+			]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/jpo-api/1.0/hierarchy" && r.URL.Query().Get("page") == "1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":1,"title":"Story","issueTypeIds":["10003"]},
+				{"id":2,"title":"Epic","issueTypeIds":["10000"]}
+			]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/jpo-api/1.0/hierarchy" && r.URL.Query().Get("page") == "2":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Fatalf("unexpected request %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("new Jira client: %v", err)
+	}
+
+	issueTypes, findings := resolveParentLinkIssueTypes(client)
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+
+	want := []string{"Epic"}
+	if !reflect.DeepEqual(issueTypes, want) {
+		t.Fatalf("unexpected issue types:\nwant: %#v\ngot:  %#v", want, issueTypes)
+	}
+}
+
+func TestExportIssuesWithParentLinkUsesHierarchyScopeInJQL(t *testing.T) {
+	var seenJQL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/field":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":"customfield_16600","name":"Parent Link","custom":true,"schema":{"custom":"com.atlassian.jpo:jpo-custom-field-parent"}}
+			]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issuetype":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":"10000","name":"Epic"},
+				{"id":"10001","name":"Initiative"}
+			]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/jpo-api/1.0/hierarchy" && r.URL.Query().Get("page") == "1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":1,"title":"Story","issueTypeIds":["10003"]},
+				{"id":2,"title":"Epic","issueTypeIds":["10000"]},
+				{"id":3,"title":"Initiative","issueTypeIds":["10001"]}
+			]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/jpo-api/1.0/hierarchy" && r.URL.Query().Get("page") == "2":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search":
+			seenJQL = r.URL.Query().Get("jql")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":0,"issues":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("new Jira client: %v", err)
+	}
+
+	cfg := Config{IssueProjectScope: "ABC"}
+	field, rows, exportPath, outOfScopePath, findings := exportIssuesWithParentLink(cfg, client, nil)
+	if field.ID != "customfield_16600" {
+		t.Fatalf("unexpected field: %#v", field)
+	}
+	if len(rows) != 0 || exportPath != "" || outOfScopePath != "" {
+		t.Fatalf("expected no exported rows, got rows=%#v export=%q outOfScope=%q", rows, exportPath, outOfScopePath)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected informational finding for empty export")
+	}
+	if !strings.Contains(seenJQL, `project in ("ABC")`) {
+		t.Fatalf("expected project scope in JQL, got %q", seenJQL)
+	}
+	if !strings.Contains(seenJQL, `type IN ("Epic", "Initiative")`) {
+		t.Fatalf("expected hierarchy-scoped issue types in JQL, got %q", seenJQL)
+	}
+	if !strings.Contains(seenJQL, `"Parent Link" is not EMPTY`) {
+		t.Fatalf("expected parent link clause in JQL, got %q", seenJQL)
+	}
+}
+
+func TestExportIssuesWithParentLinkFallsBackToEpicOnlyWhenHierarchyLookupFails(t *testing.T) {
+	var seenJQL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/field":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":"customfield_16600","name":"Parent Link","custom":true,"schema":{"custom":"com.atlassian.jpo:jpo-custom-field-parent"}}
+			]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issuetype":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"id":"10000","name":"Epic"},
+				{"id":"10001","name":"Initiative"}
+			]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/jpo-api/1.0/hierarchy":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"boom"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search":
+			seenJQL = r.URL.Query().Get("jql")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":0,"issues":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("new Jira client: %v", err)
+	}
+
+	_, _, _, _, findings := exportIssuesWithParentLink(Config{}, client, nil)
+	if !strings.Contains(seenJQL, `type IN ("Epic")`) {
+		t.Fatalf("expected Epic-only fallback JQL, got %q", seenJQL)
+	}
+
+	foundFallbackWarning := false
+	for _, finding := range findings {
+		if finding.Code == "parent_link_hierarchy_lookup_failed" {
+			foundFallbackWarning = true
+			break
+		}
+	}
+	if !foundFallbackWarning {
+		t.Fatalf("expected hierarchy fallback warning, got %#v", findings)
 	}
 }
 

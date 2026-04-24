@@ -609,9 +609,9 @@ func runConfigInitWizard(cfg Config) error {
 	cfg.IssueTeamIDsInScope = true
 	cfg.IssueTeamIDsInScopeSet = true
 	cfg.ParentLinkInScope = strings.TrimSpace(cfg.SourceBaseURL) != ""
-	cfg.ParentLinkInScopeSet = true
+	cfg.ParentLinkInScopeSet = false
 	cfg.FilterTeamIDsInScope = filterReferenceExportsAvailable(cfg)
-	cfg.FilterTeamIDsInScopeSet = true
+	cfg.FilterTeamIDsInScopeSet = false
 
 	if issueTeamCorrectionsInScope(cfg) || cfg.ParentLinkInScope {
 		issueProjectScope, err := wizard.value(wizardField{
@@ -625,6 +625,10 @@ func runConfigInitWizard(cfg Config) error {
 			return err
 		}
 		cfg.IssueProjectScope = issueProjectScope
+	}
+
+	if err := configureInitCorrectionScopes(wizard, &cfg); err != nil {
+		return err
 	}
 
 	setCurrent := "yes"
@@ -1053,6 +1057,16 @@ func promptPostMigrationCorrectionScopes(cfg *Config) error {
 	}
 	wizard := newWizard("Teams Migrator", "Post-migrate corrections")
 	return configurePostMigrationCorrectionScopesForWizard(wizard, cfg)
+}
+
+func configureInitCorrectionScopes(wizard *wizardContext, cfg *Config) error {
+	if err := configureParentLinkScope(wizard, cfg); err != nil {
+		return err
+	}
+	if err := configureFilterTeamIDScope(wizard, cfg); err != nil {
+		return err
+	}
+	return nil
 }
 
 func configureFilterTeamIDScope(wizard *wizardContext, cfg *Config) error {

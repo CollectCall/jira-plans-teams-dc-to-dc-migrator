@@ -2290,9 +2290,12 @@ func applyMigration(client *jiraClient, state *migrationState) ([]Action, []Find
 func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrationState) ([]Action, []Finding) {
 	var actions []Action
 	var findings []Finding
+	progress := newProgressTracker(countPostMigrationApplyTasks(cfg))
+	defer progress.Finish()
 
 	if issueTeamCorrectionsInScope(cfg) {
-		issueActions, issueFindings, issueResults := applyPostMigrationIssueCorrections(client, state)
+		issueTask := progress.BeginTask("Applying issue team rewrites")
+		issueActions, issueFindings, issueResults := applyPostMigrationIssueCorrections(client, state, issueTask)
 		actions = append(actions, issueActions...)
 		findings = append(findings, issueFindings...)
 		state.IssueUpdateResults = issueResults
@@ -2311,47 +2314,68 @@ func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrat
 		}
 	}
 
-	parentLinkActions, parentLinkFindings, parentLinkResults := applyPostMigrationParentLinkCorrections(client, state)
-	actions = append(actions, parentLinkActions...)
-	findings = append(findings, parentLinkFindings...)
-	state.ParentLinkUpdateResults = parentLinkResults
-	if path, err := writePostMigrationParentLinkUpdateResultsExport(cfg, parentLinkResults); err != nil {
-		findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_results_export_failed", err.Error()))
-	} else if path != "" {
-		artifact := Artifact{
-			Key:   "post_migrate_parent_link_update_results",
-			Label: "Post-migration parent-link update results",
-			Path:  path,
-			Count: len(parentLinkResults),
+	if cfg.ParentLinkInScope {
+		parentLinkTask := progress.BeginTask("Applying Parent Link rewrites")
+		parentLinkActions, parentLinkFindings, parentLinkResults := applyPostMigrationParentLinkCorrections(client, state, parentLinkTask)
+		actions = append(actions, parentLinkActions...)
+		findings = append(findings, parentLinkFindings...)
+		state.ParentLinkUpdateResults = parentLinkResults
+		if path, err := writePostMigrationParentLinkUpdateResultsExport(cfg, parentLinkResults); err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_results_export_failed", err.Error()))
+		} else if path != "" {
+			artifact := Artifact{
+				Key:   "post_migrate_parent_link_update_results",
+				Label: "Post-migration parent-link update results",
+				Path:  path,
+				Count: len(parentLinkResults),
+			}
+			state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+			actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+			findings = append(findings, newFinding(SeverityInfo, "post_migrate_parent_link_results_export_generated", fmt.Sprintf("Generated post-migration parent-link update results: %s", path)))
 		}
-		state.Artifacts = replaceArtifact(state.Artifacts, artifact)
-		actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
-		findings = append(findings, newFinding(SeverityInfo, "post_migrate_parent_link_results_export_generated", fmt.Sprintf("Generated post-migration parent-link update results: %s", path)))
 	}
 
-	filterActions, filterFindings, filterResults := applyPostMigrationFilterCorrections(client, state)
-	actions = append(actions, filterActions...)
-	findings = append(findings, filterFindings...)
-	state.FilterUpdateResults = filterResults
-	if path, err := writePostMigrationFilterUpdateResultsExport(cfg, filterResults); err != nil {
-		findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_results_export_failed", err.Error()))
-	} else if path != "" {
-		artifact := Artifact{
-			Key:   "post_migrate_filter_update_results",
-			Label: "Post-migration filter update results",
-			Path:  path,
-			Count: len(filterResults),
+	if cfg.FilterTeamIDsInScope {
+		filterTask := progress.BeginTask("Applying filter rewrites")
+		filterActions, filterFindings, filterResults := applyPostMigrationFilterCorrections(client, state, filterTask)
+		actions = append(actions, filterActions...)
+		findings = append(findings, filterFindings...)
+		state.FilterUpdateResults = filterResults
+		if path, err := writePostMigrationFilterUpdateResultsExport(cfg, filterResults); err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_results_export_failed", err.Error()))
+		} else if path != "" {
+			artifact := Artifact{
+				Key:   "post_migrate_filter_update_results",
+				Label: "Post-migration filter update results",
+				Path:  path,
+				Count: len(filterResults),
+			}
+			state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+			actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+			findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_results_export_generated", fmt.Sprintf("Generated post-migration filter update results: %s", path)))
 		}
-		state.Artifacts = replaceArtifact(state.Artifacts, artifact)
-		actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
-		findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_results_export_generated", fmt.Sprintf("Generated post-migration filter update results: %s", path)))
 	}
 
 	return actions, findings
 }
 
-func applyPostMigrationIssueCorrections(client *jiraClient, state *migrationState) ([]Action, []Finding, []PostMigrationIssueResultRow) {
+func countPostMigrationApplyTasks(cfg Config) int {
+	total := 0
+	if issueTeamCorrectionsInScope(cfg) {
+		total++
+	}
+	if cfg.ParentLinkInScope {
+		total++
+	}
+	if cfg.FilterTeamIDsInScope {
+		total++
+	}
+	return total
+}
+
+func applyPostMigrationIssueCorrections(client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationIssueResultRow) {
 	if len(state.IssueComparisons) == 0 {
+		progress.Done()
 		return nil, nil, nil
 	}
 
@@ -2360,7 +2384,8 @@ func applyPostMigrationIssueCorrections(client *jiraClient, state *migrationStat
 	actions := make([]Action, 0)
 	findings := make([]Finding, 0)
 
-	for _, comparison := range state.IssueComparisons {
+	for i, comparison := range state.IssueComparisons {
+		progress.Update(i+1, len(state.IssueComparisons))
 		result := PostMigrationIssueResultRow{
 			IssueKey:           comparison.IssueKey,
 			SourceTeamsFieldID: comparison.SourceTeamsFieldID,
@@ -2471,11 +2496,13 @@ func applyPostMigrationIssueCorrections(client *jiraClient, state *migrationStat
 		})
 	}
 
+	progress.Done()
 	return actions, findings, results
 }
 
-func applyPostMigrationParentLinkCorrections(client *jiraClient, state *migrationState) ([]Action, []Finding, []PostMigrationParentLinkResultRow) {
+func applyPostMigrationParentLinkCorrections(client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationParentLinkResultRow) {
 	if len(state.ParentLinkComparisons) == 0 {
+		progress.Done()
 		return nil, nil, nil
 	}
 
@@ -2484,7 +2511,8 @@ func applyPostMigrationParentLinkCorrections(client *jiraClient, state *migratio
 	findings := make([]Finding, 0)
 	currentParentCache := map[string]JiraIssue{}
 
-	for _, comparison := range state.ParentLinkComparisons {
+	for i, comparison := range state.ParentLinkComparisons {
+		progress.Update(i+1, len(state.ParentLinkComparisons))
 		result := PostMigrationParentLinkResultRow{
 			IssueKey:                comparison.IssueKey,
 			SourceParentLinkFieldID: comparison.SourceParentLinkFieldID,
@@ -2555,6 +2583,7 @@ func applyPostMigrationParentLinkCorrections(client *jiraClient, state *migratio
 		})
 	}
 
+	progress.Done()
 	return actions, findings, results
 }
 
@@ -2570,8 +2599,9 @@ type postMigrationFilterRewritePlan struct {
 	Message            string
 }
 
-func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationState) ([]Action, []Finding, []PostMigrationFilterResultRow) {
+func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationFilterResultRow) {
 	if len(state.FilterComparisons) == 0 {
+		progress.Done()
 		return nil, nil, nil
 	}
 
@@ -2585,7 +2615,8 @@ func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationSta
 	actions := make([]Action, 0, len(plans))
 	findings := make([]Finding, 0)
 
-	for _, plan := range plans {
+	for i, plan := range plans {
+		progress.Update(i+1, len(plans))
 		result := PostMigrationFilterResultRow{
 			SourceFilterID:     plan.SourceFilterID,
 			SourceFilterName:   plan.SourceFilterName,
@@ -2664,6 +2695,7 @@ func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationSta
 		})
 	}
 
+	progress.Done()
 	return actions, findings, results
 }
 

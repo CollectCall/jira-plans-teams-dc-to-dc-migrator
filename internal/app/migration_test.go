@@ -2114,7 +2114,7 @@ func TestApplyPostMigrationIssueCorrectionsSendsScalarTeamFieldAsString(t *testi
 		},
 	}
 
-	actions, findings, results := applyPostMigrationIssueCorrections(client, &state)
+	actions, findings, results := applyPostMigrationIssueCorrections(client, &state, &progressTask{})
 	for _, finding := range findings {
 		if finding.Severity == SeverityError || finding.Severity == SeverityWarning {
 			t.Fatalf("unexpected finding: %#v", findings)
@@ -2173,7 +2173,7 @@ func TestApplyPostMigrationIssueCorrectionsSendsSingleObjectTeamFieldAsString(t 
 		},
 	}
 
-	_, findings, results := applyPostMigrationIssueCorrections(client, &state)
+	_, findings, results := applyPostMigrationIssueCorrections(client, &state, &progressTask{})
 	for _, finding := range findings {
 		if finding.Severity == SeverityError || finding.Severity == SeverityWarning {
 			t.Fatalf("unexpected finding: %#v", findings)

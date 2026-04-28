@@ -252,7 +252,8 @@ func needsPostMigrationTargetArtifactsPreparation(cfg Config, state migrationSta
 }
 
 func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
-	if len(state.IssueTeamRows) == 0 {
+	sourceRows := issueTeamRowsInProjectScope(state.IssueTeamRows, cfg.IssueProjectScope)
+	if len(sourceRows) == 0 {
 		return nil
 	}
 
@@ -280,9 +281,9 @@ func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState,
 	}
 	progressEnd(progress)
 
-	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_issue_lookup_started", fmt.Sprintf("Resolving target issues for %d issue/team rows using Teams field %s (%s)", len(state.IssueTeamRows), selection.Field.Name, selection.Field.ID)))
+	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_issue_lookup_started", fmt.Sprintf("Resolving target issues for %d issue/team rows using Teams field %s (%s)", len(sourceRows), selection.Field.Name, selection.Field.ID)))
 
-	issueKeys := uniqueIssueKeysFromTeamRows(state.IssueTeamRows)
+	issueKeys := uniqueIssueKeysFromTeamRows(sourceRows)
 	progressStartCount(progress, "Fetching target issues for team comparison")
 	fetchedIssues, err := targetClient.SearchIssuesByKeys(issueKeys, []string{"summary", "project", "projectType", selection.Field.ID}, func(current, total int) {
 		progressUpdateCount(progress, current, total)
@@ -309,7 +310,7 @@ func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState,
 		findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_issue_snapshot_generated", fmt.Sprintf("Generated target issue snapshot: %s", path)))
 	}
 
-	comparisonRows := buildPostMigrationIssueComparisonRows(state.IssueTeamRows, selection.Field.ID, fetchedIssues, state.TeamMappings)
+	comparisonRows := buildPostMigrationIssueComparisonRows(sourceRows, selection.Field.ID, fetchedIssues, state.TeamMappings)
 	state.IssueComparisons = comparisonRows
 	if path, err := writePostMigrationIssueComparisonExport(cfg, comparisonRows); err != nil {
 		findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_comparison_failed", err.Error()))
@@ -327,7 +328,8 @@ func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState,
 }
 
 func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
-	if !cfg.ParentLinkInScope || len(state.ParentLinkRows) == 0 {
+	sourceRows := parentLinkRowsInProjectScope(state.ParentLinkRows, cfg.IssueProjectScope)
+	if !cfg.ParentLinkInScope || len(sourceRows) == 0 {
 		return nil
 	}
 
@@ -344,9 +346,9 @@ func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationS
 		return findings
 	}
 
-	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_parent_link_lookup_started", fmt.Sprintf("Resolving target Parent Link state for %d source rows using field %s (%s)", len(state.ParentLinkRows), field.Name, field.ID)))
+	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_parent_link_lookup_started", fmt.Sprintf("Resolving target Parent Link state for %d source rows using field %s (%s)", len(sourceRows), field.Name, field.ID)))
 
-	childIssueKeys := uniqueChildIssueKeysFromParentLinkRows(state.ParentLinkRows)
+	childIssueKeys := uniqueChildIssueKeysFromParentLinkRows(sourceRows)
 	progressStartCount(progress, "Fetching target child issues for Parent Link comparison")
 	childIssues, err := targetClient.SearchIssuesByKeys(childIssueKeys, []string{"summary", "project", "projectType", field.ID}, func(current, total int) {
 		progressUpdateCount(progress, current, total)
@@ -359,7 +361,7 @@ func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationS
 		findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_child_fetch_failed", fmt.Sprintf("Could not fetch target child issue %s: issue was not returned by target Jira search", issueKey)))
 	}
 
-	parentIssueKeys := uniqueParentIssueKeysFromParentLinkRows(state.ParentLinkRows)
+	parentIssueKeys := uniqueParentIssueKeysFromParentLinkRows(sourceRows)
 	progressStartCount(progress, "Fetching target parent issues for Parent Link comparison")
 	targetParents, err := targetClient.SearchIssuesByKeys(parentIssueKeys, []string{"summary", "project"}, func(current, total int) {
 		progressUpdateCount(progress, current, total)
@@ -387,7 +389,7 @@ func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationS
 		findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_parent_link_snapshot_generated", fmt.Sprintf("Generated target Parent Link snapshot: %s", path)))
 	}
 
-	comparisonRows, comparisonFindings := buildPostMigrationParentLinkComparisonRows(targetClient, state.ParentLinkRows, field.ID, childIssues, targetParents, currentParentCache)
+	comparisonRows, comparisonFindings := buildPostMigrationParentLinkComparisonRows(targetClient, sourceRows, field.ID, childIssues, targetParents, currentParentCache)
 	findings = append(findings, comparisonFindings...)
 	state.ParentLinkComparisons = comparisonRows
 	if path, err := writePostMigrationParentLinkComparisonExport(cfg, comparisonRows); err != nil {
@@ -1732,6 +1734,7 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 			if err != nil {
 				findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_export_reuse_failed", fmt.Sprintf("Could not reuse existing issue/team export %s: %v", issuePath, err)))
 			} else {
+				rows = issueTeamRowsInProjectScope(rows, cfg.IssueProjectScope)
 				state.IssueTeamRows = rows
 				state.IssueExportPath = issuePath
 				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
@@ -1749,6 +1752,7 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 			progressStartCount(progress, "Rebuilding source issue/team export")
 			selection, issueRows, issuePath, issueImportPath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, state.SourceTeams, progress)
 			state.TeamsField = selection
+			issueRows = issueTeamRowsInProjectScope(issueRows, cfg.IssueProjectScope)
 			state.IssueTeamRows = issueRows
 			findings = append(findings, issueFindings...)
 			if issuePath != "" {
@@ -1783,6 +1787,7 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 		if err != nil {
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_export_reuse_failed", fmt.Sprintf("Could not reuse existing parent-link export %s: %v", parentPath, err)))
 		} else {
+			rows = parentLinkRowsInProjectScope(rows, cfg.IssueProjectScope)
 			state.ParentLinkRows = rows
 			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
 				Key:   "source_issues_with_parent_link",
@@ -1798,6 +1803,7 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 	if len(state.ParentLinkRows) == 0 && cfg.ParentLinkInScope && sourceClient != nil {
 		progressStartCount(progress, "Rebuilding source Parent Link export")
 		_, rows, exportPath, outOfScopePath, parentFindings := exportIssuesWithParentLink(cfg, sourceClient, progress)
+		rows = parentLinkRowsInProjectScope(rows, cfg.IssueProjectScope)
 		state.ParentLinkRows = rows
 		findings = append(findings, parentFindings...)
 		if exportPath != "" {
@@ -2295,7 +2301,7 @@ func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrat
 
 	if issueTeamCorrectionsInScope(cfg) {
 		issueTask := progress.BeginTask("Applying issue team rewrites")
-		issueActions, issueFindings, issueResults := applyPostMigrationIssueCorrections(client, state, issueTask)
+		issueActions, issueFindings, issueResults := applyPostMigrationIssueCorrections(cfg, client, state, issueTask)
 		actions = append(actions, issueActions...)
 		findings = append(findings, issueFindings...)
 		state.IssueUpdateResults = issueResults
@@ -2316,7 +2322,7 @@ func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrat
 
 	if cfg.ParentLinkInScope {
 		parentLinkTask := progress.BeginTask("Applying Parent Link rewrites")
-		parentLinkActions, parentLinkFindings, parentLinkResults := applyPostMigrationParentLinkCorrections(client, state, parentLinkTask)
+		parentLinkActions, parentLinkFindings, parentLinkResults := applyPostMigrationParentLinkCorrections(cfg, client, state, parentLinkTask)
 		actions = append(actions, parentLinkActions...)
 		findings = append(findings, parentLinkFindings...)
 		state.ParentLinkUpdateResults = parentLinkResults
@@ -2373,13 +2379,14 @@ func countPostMigrationApplyTasks(cfg Config) int {
 	return total
 }
 
-func applyPostMigrationIssueCorrections(client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationIssueResultRow) {
+func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationIssueResultRow) {
 	if len(state.IssueComparisons) == 0 {
 		progress.Done()
 		return nil, nil, nil
 	}
 
 	targetTeamIDs := teamTargetIDsBySourceID(state.TeamMappings)
+	sourceIssueKeys := issueTeamSourceIssueKeySet(state.IssueTeamRows)
 	results := make([]PostMigrationIssueResultRow, 0, len(state.IssueComparisons))
 	actions := make([]Action, 0)
 	findings := make([]Finding, 0)
@@ -2397,6 +2404,24 @@ func applyPostMigrationIssueCorrections(client *jiraClient, state *migrationStat
 		}
 
 		if comparison.Status != "ready" {
+			results = append(results, result)
+			continue
+		}
+		if len(sourceIssueKeys) == 0 {
+			result.Status = "source_export_missing"
+			result.Message = "No source issue/team export rows are available for this issue correction"
+			results = append(results, result)
+			continue
+		}
+		if _, ok := sourceIssueKeys[strings.TrimSpace(comparison.IssueKey)]; !ok {
+			result.Status = "not_in_source_export"
+			result.Message = "This issue was not present in the source issue/team export"
+			results = append(results, result)
+			continue
+		}
+		if !issueProjectInScope(cfg.IssueProjectScope, comparison.ProjectKey) {
+			result.Status = "out_of_scope_project"
+			result.Message = "This issue project is outside the configured issue project scope"
 			results = append(results, result)
 			continue
 		}
@@ -2500,7 +2525,7 @@ func applyPostMigrationIssueCorrections(client *jiraClient, state *migrationStat
 	return actions, findings, results
 }
 
-func applyPostMigrationParentLinkCorrections(client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationParentLinkResultRow) {
+func applyPostMigrationParentLinkCorrections(cfg Config, client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationParentLinkResultRow) {
 	if len(state.ParentLinkComparisons) == 0 {
 		progress.Done()
 		return nil, nil, nil
@@ -2510,6 +2535,7 @@ func applyPostMigrationParentLinkCorrections(client *jiraClient, state *migratio
 	actions := make([]Action, 0)
 	findings := make([]Finding, 0)
 	currentParentCache := map[string]JiraIssue{}
+	sourceIssueKeys := parentLinkSourceIssueKeySet(state.ParentLinkRows)
 
 	for i, comparison := range state.ParentLinkComparisons {
 		progress.Update(i+1, len(state.ParentLinkComparisons))
@@ -2528,6 +2554,24 @@ func applyPostMigrationParentLinkCorrections(client *jiraClient, state *migratio
 		}
 
 		if comparison.Status != "ready" {
+			results = append(results, result)
+			continue
+		}
+		if len(sourceIssueKeys) == 0 {
+			result.Status = "source_export_missing"
+			result.Message = "No source Parent Link export rows are available for this correction"
+			results = append(results, result)
+			continue
+		}
+		if _, ok := sourceIssueKeys[strings.TrimSpace(comparison.IssueKey)]; !ok {
+			result.Status = "not_in_source_export"
+			result.Message = "This issue was not present in the source Parent Link export"
+			results = append(results, result)
+			continue
+		}
+		if !issueProjectInScope(cfg.IssueProjectScope, comparison.ProjectKey) {
+			result.Status = "out_of_scope_project"
+			result.Message = "This issue project is outside the configured issue project scope"
 			results = append(results, result)
 			continue
 		}
@@ -4991,6 +5035,67 @@ func projectScopeSet(projects []string) map[string]struct{} {
 			continue
 		}
 		out[project] = struct{}{}
+	}
+	return out
+}
+
+func issueProjectInScope(scope, projectKey string) bool {
+	projects, err := normalizeIssueProjectScope(scope)
+	if err != nil || len(projects) == 0 {
+		return true
+	}
+	_, ok := projectScopeSet(projects)[strings.ToUpper(strings.TrimSpace(projectKey))]
+	return ok
+}
+
+func issueTeamRowsInProjectScope(rows []IssueTeamRow, scope string) []IssueTeamRow {
+	projects, err := normalizeIssueProjectScope(scope)
+	if err != nil || len(projects) == 0 {
+		return rows
+	}
+	projectSet := projectScopeSet(projects)
+	out := make([]IssueTeamRow, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := projectSet[strings.ToUpper(strings.TrimSpace(row.ProjectKey))]; ok {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func parentLinkRowsInProjectScope(rows []ParentLinkRow, scope string) []ParentLinkRow {
+	projects, err := normalizeIssueProjectScope(scope)
+	if err != nil || len(projects) == 0 {
+		return rows
+	}
+	projectSet := projectScopeSet(projects)
+	out := make([]ParentLinkRow, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := projectSet[strings.ToUpper(strings.TrimSpace(row.ProjectKey))]; ok {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func issueTeamSourceIssueKeySet(rows []IssueTeamRow) map[string]struct{} {
+	out := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		key := strings.TrimSpace(row.IssueKey)
+		if key != "" {
+			out[key] = struct{}{}
+		}
+	}
+	return out
+}
+
+func parentLinkSourceIssueKeySet(rows []ParentLinkRow) map[string]struct{} {
+	out := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		key := strings.TrimSpace(row.IssueKey)
+		if key != "" {
+			out[key] = struct{}{}
+		}
 	}
 	return out
 }

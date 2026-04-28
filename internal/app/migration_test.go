@@ -2101,9 +2101,13 @@ func TestApplyPostMigrationIssueCorrectionsSendsScalarTeamFieldAsString(t *testi
 		TeamMappings: []TeamMapping{
 			{SourceTeamID: 4, TargetTeamID: "8", Decision: "merge"},
 		},
+		IssueTeamRows: []IssueTeamRow{
+			{IssueKey: "TP-1", ProjectKey: "TP", SourceTeamIDs: "4", TeamsFieldID: "customfield_16604"},
+		},
 		IssueComparisons: []PostMigrationIssueComparisonRow{
 			{
 				IssueKey:             "TP-1",
+				ProjectKey:           "TP",
 				SourceTeamsFieldID:   "customfield_16604",
 				TargetTeamsFieldID:   "customfield_16604",
 				SourceTeamIDs:        "4",
@@ -2114,7 +2118,7 @@ func TestApplyPostMigrationIssueCorrectionsSendsScalarTeamFieldAsString(t *testi
 		},
 	}
 
-	actions, findings, results := applyPostMigrationIssueCorrections(client, &state, &progressTask{})
+	actions, findings, results := applyPostMigrationIssueCorrections(Config{}, client, &state, &progressTask{})
 	for _, finding := range findings {
 		if finding.Severity == SeverityError || finding.Severity == SeverityWarning {
 			t.Fatalf("unexpected finding: %#v", findings)
@@ -2160,9 +2164,13 @@ func TestApplyPostMigrationIssueCorrectionsSendsSingleObjectTeamFieldAsString(t 
 		TeamMappings: []TeamMapping{
 			{SourceTeamID: 4, TargetTeamID: "8", Decision: "merge"},
 		},
+		IssueTeamRows: []IssueTeamRow{
+			{IssueKey: "TP-1", ProjectKey: "TP", SourceTeamIDs: "4", TeamsFieldID: "customfield_16604"},
+		},
 		IssueComparisons: []PostMigrationIssueComparisonRow{
 			{
 				IssueKey:             "TP-1",
+				ProjectKey:           "TP",
 				SourceTeamsFieldID:   "customfield_16604",
 				TargetTeamsFieldID:   "customfield_16604",
 				SourceTeamIDs:        "4",
@@ -2173,7 +2181,7 @@ func TestApplyPostMigrationIssueCorrectionsSendsSingleObjectTeamFieldAsString(t 
 		},
 	}
 
-	_, findings, results := applyPostMigrationIssueCorrections(client, &state, &progressTask{})
+	_, findings, results := applyPostMigrationIssueCorrections(Config{}, client, &state, &progressTask{})
 	for _, finding := range findings {
 		if finding.Severity == SeverityError || finding.Severity == SeverityWarning {
 			t.Fatalf("unexpected finding: %#v", findings)
@@ -2184,6 +2192,135 @@ func TestApplyPostMigrationIssueCorrectionsSendsSingleObjectTeamFieldAsString(t 
 	}
 	if !strings.Contains(updateBody, `"customfield_16604":"8"`) {
 		t.Fatalf("expected single object team field update payload to use a string value, got %s", updateBody)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsSkipsRowsOutsideCurrentProjectScope(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	state := migrationState{
+		TeamMappings:  []TeamMapping{{SourceTeamID: 4, TargetTeamID: "8", Decision: "merge"}},
+		IssueTeamRows: []IssueTeamRow{{IssueKey: "OUT-1", ProjectKey: "OUT", SourceTeamIDs: "4", TeamsFieldID: "customfield_16604"}},
+		IssueComparisons: []PostMigrationIssueComparisonRow{{
+			IssueKey:             "OUT-1",
+			ProjectKey:           "OUT",
+			SourceTeamsFieldID:   "customfield_16604",
+			TargetTeamsFieldID:   "customfield_16604",
+			SourceTeamIDs:        "4",
+			TargetTeamIDs:        "8",
+			CurrentTargetTeamIDs: "4",
+			Status:               "ready",
+		}},
+	}
+
+	actions, findings, results := applyPostMigrationIssueCorrections(Config{IssueProjectScope: "IN"}, client, &state, &progressTask{})
+	for _, finding := range findings {
+		if finding.Severity == SeverityError || finding.Severity == SeverityWarning {
+			t.Fatalf("unexpected finding: %#v", findings)
+		}
+	}
+	if len(actions) != 0 {
+		t.Fatalf("expected no update actions, got %#v", actions)
+	}
+	if requests != 0 {
+		t.Fatalf("expected scope guard to avoid Jira requests, got %d", requests)
+	}
+	if len(results) != 1 || results[0].Status != "out_of_scope_project" {
+		t.Fatalf("expected out_of_scope_project result, got %#v", results)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsSkipsRowsMissingFromSourceExport(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	state := migrationState{
+		TeamMappings:  []TeamMapping{{SourceTeamID: 4, TargetTeamID: "8", Decision: "merge"}},
+		IssueTeamRows: []IssueTeamRow{{IssueKey: "IN-1", ProjectKey: "IN", SourceTeamIDs: "4", TeamsFieldID: "customfield_16604"}},
+		IssueComparisons: []PostMigrationIssueComparisonRow{{
+			IssueKey:             "OTHER-1",
+			ProjectKey:           "IN",
+			SourceTeamsFieldID:   "customfield_16604",
+			TargetTeamsFieldID:   "customfield_16604",
+			SourceTeamIDs:        "4",
+			TargetTeamIDs:        "8",
+			CurrentTargetTeamIDs: "4",
+			Status:               "ready",
+		}},
+	}
+
+	_, _, results := applyPostMigrationIssueCorrections(Config{IssueProjectScope: "IN"}, client, &state, &progressTask{})
+	if requests != 0 {
+		t.Fatalf("expected source-export guard to avoid Jira requests, got %d", requests)
+	}
+	if len(results) != 1 || results[0].Status != "not_in_source_export" {
+		t.Fatalf("expected not_in_source_export result, got %#v", results)
+	}
+}
+
+func TestApplyPostMigrationParentLinkCorrectionsSkipsRowsOutsideCurrentProjectScope(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	state := migrationState{
+		ParentLinkRows: []ParentLinkRow{{IssueKey: "OUT-1", ProjectKey: "OUT", SourceParentIssueKey: "INIT-1"}},
+		ParentLinkComparisons: []PostMigrationParentLinkComparisonRow{{
+			IssueKey:                "OUT-1",
+			ProjectKey:              "OUT",
+			SourceParentLinkFieldID: "customfield_16605",
+			TargetParentLinkFieldID: "customfield_19999",
+			SourceParentIssueID:     "5001",
+			SourceParentIssueKey:    "INIT-1",
+			TargetParentIssueID:     "6001",
+			TargetParentIssueKey:    "INIT-1",
+			CurrentParentIssueID:    "7001",
+			CurrentParentIssueKey:   "OTHER-1",
+			Status:                  "ready",
+		}},
+	}
+
+	actions, findings, results := applyPostMigrationParentLinkCorrections(Config{IssueProjectScope: "IN"}, client, &state, &progressTask{})
+	for _, finding := range findings {
+		if finding.Severity == SeverityError || finding.Severity == SeverityWarning {
+			t.Fatalf("unexpected finding: %#v", findings)
+		}
+	}
+	if len(actions) != 0 {
+		t.Fatalf("expected no update actions, got %#v", actions)
+	}
+	if requests != 0 {
+		t.Fatalf("expected scope guard to avoid Jira requests, got %d", requests)
+	}
+	if len(results) != 1 || results[0].Status != "out_of_scope_project" {
+		t.Fatalf("expected out_of_scope_project result, got %#v", results)
 	}
 }
 

@@ -624,7 +624,7 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 			body = bytes.NewReader(payloadBytes)
 		}
 
-		req, err := http.NewRequest(method, u.String(), body)
+		req, err := newValidatedJiraRequest(method, *u, body)
 		if err != nil {
 			return nil, err
 		}
@@ -676,6 +676,40 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 	}
 
 	return nil, lastErr
+}
+
+func newValidatedJiraRequest(method string, u url.URL, body io.Reader) (*http.Request, error) {
+	parsedURL, err := validatedJiraRequestURL(u)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(method, "https://jira.invalid/", body)
+	if err != nil {
+		return nil, err
+	}
+	req.URL = parsedURL
+	return req, nil
+}
+
+func validatedJiraRequestURL(u url.URL) (*url.URL, error) {
+	raw := u.String()
+	if strings.ContainsAny(raw, "\x00\r\n\t") {
+		return nil, fmt.Errorf("invalid Jira request URL: contains control characters")
+	}
+	if !u.IsAbs() || u.Host == "" || u.Hostname() == "" {
+		return nil, fmt.Errorf("invalid Jira request URL: absolute http or https URL with a host is required")
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return nil, fmt.Errorf("invalid Jira request URL: scheme must be http or https")
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("invalid Jira request URL: embedded credentials are not allowed")
+	}
+	if u.Fragment != "" {
+		return nil, fmt.Errorf("invalid Jira request URL: fragments are not allowed")
+	}
+	clean := u
+	return &clean, nil
 }
 
 func shouldRetryJiraRequest(method string, statusCode int) bool {

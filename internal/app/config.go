@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -151,6 +152,9 @@ func parseConfig(args []string) (Config, error) {
 	if cfg.OutputTimestamp == "" {
 		cfg.OutputTimestamp = time.Now().Format("20060102-150405")
 	}
+	if cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir); err != nil {
+		return Config{}, err
+	}
 	if cfg.Apply {
 		cfg.DryRun = false
 	}
@@ -208,6 +212,9 @@ func parseConfig(args []string) (Config, error) {
 				return Config{}, err
 			}
 		}
+	}
+	if cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir); err != nil {
+		return Config{}, err
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -440,7 +447,11 @@ func normalizeIssueProjectScope(raw string) ([]string, error) {
 }
 
 func validateIdentityMappingFile(path string) []Finding {
-	file, err := os.Open(path)
+	cleanPath, err := cleanInputFilePath("identity mapping", path)
+	if err != nil {
+		return []Finding{newFinding(SeverityError, "identity_mapping_unreadable", err.Error())}
+	}
+	file, err := os.OpenInRoot(filepath.Dir(cleanPath), filepath.Base(cleanPath))
 	if err != nil {
 		return []Finding{newFinding(SeverityError, "identity_mapping_unreadable", fmt.Sprintf("Could not open identity mapping file: %v", err))}
 	}
@@ -536,7 +547,11 @@ func ensureOutputDir(path string) error {
 	if path == "" {
 		return nil
 	}
-	return os.MkdirAll(path, 0o755)
+	cleanPath, err := cleanOutputDirPath(path)
+	if err != nil {
+		return err
+	}
+	return os.MkdirAll(cleanPath, 0o755)
 }
 
 func defaultOutputPath(cfg Config) string {

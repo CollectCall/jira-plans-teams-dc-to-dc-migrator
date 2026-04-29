@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -136,6 +137,12 @@ func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) 
 	if issueTeamCorrectionsInScope(cfg) {
 		if len(state.IssueTeamRows) == 0 {
 			if issuePath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-teams.pre-migration.csv"); ok {
+				var err error
+				issuePath, err = cleanInputFilePath("issue/team export", issuePath)
+				if err != nil {
+					findings = append(findings, newFinding(SeverityWarning, "migration_issue_mapping_input_load_failed", err.Error()))
+					return findings, actions
+				}
 				rows, err := loadIssueTeamRowsFromExport(issuePath)
 				if err != nil {
 					findings = append(findings, newFinding(SeverityWarning, "migration_issue_mapping_input_load_failed", fmt.Sprintf("Could not load issue/team export %s: %v", issuePath, err)))
@@ -167,6 +174,12 @@ func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) 
 	if cfg.ParentLinkInScope {
 		if len(state.ParentLinkRows) == 0 {
 			if parentPath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv"); ok {
+				var err error
+				parentPath, err = cleanInputFilePath("parent link export", parentPath)
+				if err != nil {
+					findings = append(findings, newFinding(SeverityWarning, "migration_parent_link_input_load_failed", err.Error()))
+					return findings, actions
+				}
 				rows, err := loadParentLinkRowsFromExport(parentPath)
 				if err != nil {
 					findings = append(findings, newFinding(SeverityWarning, "migration_parent_link_input_load_failed", fmt.Sprintf("Could not load parent link export %s: %v", parentPath, err)))
@@ -199,6 +212,12 @@ func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) 
 	if cfg.FilterTeamIDsInScope {
 		if len(state.FilterTeamClauseRows) == 0 {
 			if filterPath, ok := latestOutputFamilyPath(cfg.OutputDir, "filters-with-team-clauses.pre-migration.csv"); ok {
+				var err error
+				filterPath, err = cleanInputFilePath("filter export", filterPath)
+				if err != nil {
+					findings = append(findings, newFinding(SeverityWarning, "migration_filter_mapping_input_load_failed", err.Error()))
+					return findings, actions
+				}
 				rows, err := loadFilterTeamClauseRowsFromExport(filterPath)
 				if err != nil {
 					findings = append(findings, newFinding(SeverityWarning, "migration_filter_mapping_input_load_failed", fmt.Sprintf("Could not load filter export %s: %v", filterPath, err)))
@@ -416,6 +435,12 @@ func loadOrResolveTargetParentLinkField(cfg Config, state *migrationState, targe
 
 	if path, ok := latestOutputFamilyPath(cfg.OutputDir, "target-parent-link-field.pre-migration.csv"); ok {
 		progressStart(progress, "Loading pre-migration target Parent Link field")
+		cleanPath, cleanErr := cleanInputFilePath("target parent link field export", path)
+		if cleanErr != nil {
+			progressEnd(progress)
+			return nil, []Finding{newFinding(SeverityWarning, "post_migrate_target_parent_link_field_reuse_failed", cleanErr.Error())}
+		}
+		path = cleanPath
 		row, err := loadParentLinkFieldFromExport(path)
 		progressEnd(progress)
 		if err != nil {
@@ -1243,6 +1268,13 @@ func replaceFirstLiteralFold(s, old, replacement string) (string, bool) {
 
 func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	var findings []Finding
+	outputDir, err := cleanOutputDirPath(cfg.OutputDir)
+	if err != nil {
+		findings = append(findings, newFinding(SeverityError, "invalid_output_dir", err.Error()))
+		return migrationState{}, findings
+	}
+	cfg.OutputDir = outputDir
+
 	progressTotal := 13
 	if runsPreMigratePhase(cfg.Command, cfg.Phase) {
 		progressTotal += 2
@@ -1634,6 +1666,13 @@ func loadMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTracker
 
 	if mappingPath, ok := latestOutputFamilyPath(cfg.OutputDir, "team-mapping.pre-migration.csv"); ok {
 		progressStart(progress, "Loading pre-migration team mapping")
+		cleanPath, cleanErr := cleanInputFilePath("team mapping export", mappingPath)
+		if cleanErr != nil {
+			findings = append(findings, newFinding(SeverityError, "migrate_team_mapping_load_failed", cleanErr.Error()))
+			progressEnd(progress)
+			return state, findings
+		}
+		mappingPath = cleanPath
 		rows, err := loadTeamMappingsFromExport(mappingPath)
 		if err != nil {
 			findings = append(findings, newFinding(SeverityError, "migrate_team_mapping_load_failed", fmt.Sprintf("Could not load team mapping export %s: %v", mappingPath, err)))
@@ -1651,6 +1690,13 @@ func loadMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTracker
 	}
 	if membershipPath, ok := latestOutputFamilyPath(cfg.OutputDir, "team-membership-mapping.pre-migration.csv"); ok {
 		progressStart(progress, "Loading pre-migration team membership mapping")
+		cleanPath, cleanErr := cleanInputFilePath("team membership mapping export", membershipPath)
+		if cleanErr != nil {
+			findings = append(findings, newFinding(SeverityError, "migrate_membership_mapping_load_failed", cleanErr.Error()))
+			progressEnd(progress)
+			return state, findings
+		}
+		membershipPath = cleanPath
 		rows, err := loadResourcePlansFromExport(membershipPath)
 		if err != nil {
 			findings = append(findings, newFinding(SeverityError, "migrate_membership_mapping_load_failed", fmt.Sprintf("Could not load team membership mapping export %s: %v", membershipPath, err)))
@@ -1675,6 +1721,13 @@ func loadPostMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTra
 
 	if mappingPath, ok := latestPostMigrateTeamMappingPath(cfg.OutputDir); ok {
 		progressStart(progress, "Loading team ID mapping export")
+		cleanPath, cleanErr := cleanInputFilePath("team ID mapping export", mappingPath)
+		if cleanErr != nil {
+			findings = append(findings, newFinding(SeverityError, "post_migrate_team_mapping_load_failed", cleanErr.Error()))
+			progressEnd(progress)
+			return state, findings
+		}
+		mappingPath = cleanPath
 		rows, err := loadTeamMappingsFromExport(mappingPath)
 		if err != nil {
 			findings = append(findings, newFinding(SeverityError, "post_migrate_team_mapping_load_failed", fmt.Sprintf("Could not load team mapping export %s: %v", mappingPath, err)))
@@ -1734,6 +1787,13 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 	if issueTeamCorrectionsInScope(cfg) {
 		if issuePath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-teams.pre-migration.csv"); ok {
 			progressStart(progress, "Loading pre-migration issue/team export")
+			cleanPath, cleanErr := cleanInputFilePath("issue/team export", issuePath)
+			if cleanErr != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_export_reuse_failed", cleanErr.Error()))
+				progressEnd(progress)
+				return state, findings
+			}
+			issuePath = cleanPath
 			rows, err := loadIssueTeamRowsFromExport(issuePath)
 			if err != nil {
 				findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_export_reuse_failed", fmt.Sprintf("Could not reuse existing issue/team export %s: %v", issuePath, err)))
@@ -1787,6 +1847,13 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 
 	if parentPath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv"); ok {
 		progressStart(progress, "Loading pre-migration Parent Link export")
+		cleanPath, cleanErr := cleanInputFilePath("parent link export", parentPath)
+		if cleanErr != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_export_reuse_failed", cleanErr.Error()))
+			progressEnd(progress)
+			return state, findings
+		}
+		parentPath = cleanPath
 		rows, err := loadParentLinkRowsFromExport(parentPath)
 		if err != nil {
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_export_reuse_failed", fmt.Sprintf("Could not reuse existing parent-link export %s: %v", parentPath, err)))
@@ -1835,6 +1902,13 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 	if cfg.FilterTeamIDsInScope {
 		if filterPath, ok := latestOutputFamilyPath(cfg.OutputDir, "filters-with-team-clauses.pre-migration.csv"); ok {
 			progressStart(progress, "Loading pre-migration filter Team-clause export")
+			cleanPath, cleanErr := cleanInputFilePath("filter export", filterPath)
+			if cleanErr != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_export_reuse_failed", cleanErr.Error()))
+				progressEnd(progress)
+				return state, findings
+			}
+			filterPath = cleanPath
 			rows, err := loadFilterTeamClauseRowsFromExport(filterPath)
 			if err != nil {
 				findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_export_reuse_failed", fmt.Sprintf("Could not reuse existing filter export %s: %v", filterPath, err)))
@@ -3395,7 +3469,11 @@ func loadIdentityMappings(path string) (IdentityMapping, error) {
 	if strings.TrimSpace(path) == "" {
 		return IdentityMapping{}, nil
 	}
-	file, err := os.Open(path)
+	cleanPath, err := cleanInputFilePath("identity mapping", path)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.OpenInRoot(filepath.Dir(cleanPath), filepath.Base(cleanPath))
 	if err != nil {
 		return nil, err
 	}
@@ -3464,7 +3542,12 @@ func writeGeneratedIdentityMapping(cfg Config, mappings IdentityMapping) (string
 	if len(mappings) == 0 {
 		return "", nil
 	}
-	if err := ensureOutputDir(cfg.OutputDir); err != nil {
+	outputDir, err := cleanOutputDirPath(cfg.OutputDir)
+	if err != nil {
+		return "", err
+	}
+	cfg.OutputDir = outputDir
+	if err := ensureOutputDir(outputDir); err != nil {
 		return "", err
 	}
 
@@ -3495,7 +3578,7 @@ func writeGeneratedIdentityMapping(cfg Config, mappings IdentityMapping) (string
 	if err := writer.Error(); err != nil {
 		return "", err
 	}
-	if err := pruneOutputFamily(cfg.OutputDir, name, outputRetentionLimit); err != nil {
+	if err := pruneOutputFamily(outputDir, name, outputRetentionLimit); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -4415,10 +4498,19 @@ func expectedSequentialID(existingCount, createOffset int) string {
 }
 
 func enrichIssuesCSV(cfg Config, mappings []TeamMapping, teams []TeamDTO) (string, error) {
-	if err := ensureOutputDir(cfg.OutputDir); err != nil {
+	outputDir, err := cleanOutputDirPath(cfg.OutputDir)
+	if err != nil {
 		return "", err
 	}
-	file, err := os.Open(cfg.IssuesCSV)
+	cfg.OutputDir = outputDir
+	if err := ensureOutputDir(outputDir); err != nil {
+		return "", err
+	}
+	issuesCSV, err := cleanInputFilePath("issues CSV", cfg.IssuesCSV)
+	if err != nil {
+		return "", err
+	}
+	file, err := os.OpenInRoot(filepath.Dir(issuesCSV), filepath.Base(issuesCSV))
 	if err != nil {
 		return "", err
 	}
@@ -4494,7 +4586,7 @@ func enrichIssuesCSV(cfg Config, mappings []TeamMapping, teams []TeamDTO) (strin
 	if err := writer.Error(); err != nil {
 		return "", err
 	}
-	if err := pruneOutputFamily(cfg.OutputDir, name, outputRetentionLimit); err != nil {
+	if err := pruneOutputFamily(outputDir, name, outputRetentionLimit); err != nil {
 		return "", err
 	}
 	return outputPath, nil
@@ -4579,7 +4671,12 @@ func writeMetadataSnapshot(path string, value any) error {
 }
 
 func writeEntityExports(cfg Config, state migrationState) ([]Artifact, error) {
-	if err := ensureOutputDir(cfg.OutputDir); err != nil {
+	outputDir, err := cleanOutputDirPath(cfg.OutputDir)
+	if err != nil {
+		return nil, err
+	}
+	cfg.OutputDir = outputDir
+	if err := ensureOutputDir(outputDir); err != nil {
 		return nil, err
 	}
 
@@ -4701,6 +4798,11 @@ func replaceArtifact(artifacts []Artifact, replacement Artifact) []Artifact {
 }
 
 func writeCSVExport(cfg Config, name string, header []string, rows [][]string) (string, error) {
+	outputDir, err := cleanOutputDirPath(cfg.OutputDir)
+	if err != nil {
+		return "", err
+	}
+	cfg.OutputDir = outputDir
 	path := outputPathForName(cfg, name)
 	file, err := os.Create(path)
 	if err != nil {
@@ -4721,7 +4823,7 @@ func writeCSVExport(cfg Config, name string, header []string, rows [][]string) (
 	if err := writer.Error(); err != nil {
 		return "", err
 	}
-	if err := pruneOutputFamily(cfg.OutputDir, name, outputRetentionLimit); err != nil {
+	if err := pruneOutputFamily(outputDir, name, outputRetentionLimit); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -5626,7 +5728,12 @@ func extractTeamFieldIDs(raw any) []string {
 }
 
 func writeIssueTeamExports(cfg Config, rows []IssueTeamRow) (string, string, error) {
-	if err := ensureOutputDir(cfg.OutputDir); err != nil {
+	outputDir, err := cleanOutputDirPath(cfg.OutputDir)
+	if err != nil {
+		return "", "", err
+	}
+	cfg.OutputDir = outputDir
+	if err := ensureOutputDir(outputDir); err != nil {
 		return "", "", err
 	}
 

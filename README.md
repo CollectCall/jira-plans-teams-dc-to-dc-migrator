@@ -225,6 +225,10 @@ Sample SQL exports are provided under `scripts/sql/`:
 - override with `--config` or `TEAMS_MIGRATOR_CONFIG_PATH`
 - select a profile with `--profile` or `TEAMS_MIGRATOR_PROFILE`
 
+Path options may be relative to the current working directory or absolute, but
+must not contain parent traversal segments such as `..`. For example, use
+`out`, `reports/migration`, or `/Users/you/migration/out` instead of `../out`.
+
 Useful options:
 
 - `--filter-source-csv <path>`: use a DB-derived filter CSV instead of ScriptRunner

@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -285,7 +286,11 @@ func parseCSVFloatPtr(value string) *float64 {
 }
 
 func readCSVRecordsFromFile(path string) ([][]string, error) {
-	file, err := os.Open(path)
+	cleanPath, err := cleanInputFilePath("CSV input", path)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.OpenInRoot(filepath.Dir(cleanPath), filepath.Base(cleanPath))
 	if err != nil {
 		return nil, err
 	}

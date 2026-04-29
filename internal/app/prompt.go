@@ -466,6 +466,11 @@ func runConfigInitWizard(cfg Config) error {
 	if !isInteractiveTerminal() {
 		return errors.New("init requires a terminal")
 	}
+	configPath, err := cleanInputFilePath("config", cfg.ConfigPath)
+	if err != nil {
+		return err
+	}
+	cfg.ConfigPath = configPath
 
 	store, err := loadProfileStore(cfg.ConfigPath)
 	if err != nil {
@@ -592,6 +597,9 @@ func runConfigInitWizard(cfg Config) error {
 		Default:      nonEmptyDefault(cfg.OutputDir, "out"),
 	})
 	if err != nil {
+		return err
+	}
+	if cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir); err != nil {
 		return err
 	}
 	teamScope, err := wizard.choice(wizardField{

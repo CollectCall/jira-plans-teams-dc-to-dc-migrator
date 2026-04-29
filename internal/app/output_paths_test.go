@@ -75,3 +75,43 @@ func TestLatestOutputFamilyPathPrefersNewestTimestampedFile(t *testing.T) {
 		t.Fatalf("unexpected latest output path: want %q, got %q", want, got)
 	}
 }
+
+func TestCleanOutputDirPathRejectsParentTraversal(t *testing.T) {
+	separator := string(os.PathSeparator)
+	for _, path := range []string{
+		"../out",
+		"out/../other",
+		t.TempDir() + separator + ".." + separator + "other",
+	} {
+		if _, err := cleanOutputDirPath(path); err == nil {
+			t.Fatalf("expected %q to be rejected", path)
+		}
+	}
+}
+
+func TestCleanOutputDirPathAllowsRelativeAndAbsoluteOutputDirs(t *testing.T) {
+	for _, path := range []string{
+		"out",
+		filepath.Join("reports", "migration"),
+		t.TempDir(),
+	} {
+		if got, err := cleanOutputDirPath(path); err != nil {
+			t.Fatalf("cleanOutputDirPath(%q) returned error: %v", path, err)
+		} else if got == "" {
+			t.Fatalf("cleanOutputDirPath(%q) returned empty path", path)
+		}
+	}
+}
+
+func TestOutputFilePathFromEntryRejectsNonLocalNames(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{
+		"../report.csv",
+		filepath.Join("nested", "report.csv"),
+		"",
+	} {
+		if _, err := outputFilePathFromEntry(dir, name); err == nil {
+			t.Fatalf("expected %q to be rejected", name)
+		}
+	}
+}

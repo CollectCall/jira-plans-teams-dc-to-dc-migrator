@@ -131,6 +131,61 @@ func TestParseConfigAcceptsExplicitMigrationPhase(t *testing.T) {
 	}
 }
 
+func TestParseConfigRejectsOutputDirParentTraversal(t *testing.T) {
+	_, err := parseConfig([]string{"migrate", "--no-input", "--output-dir", filepath.Join("..", "out")})
+	if err == nil {
+		t.Fatal("expected output directory traversal to be rejected")
+	}
+}
+
+func TestRunReportRejectsInputParentTraversal(t *testing.T) {
+	_, err := runReport(Config{
+		Command:     "report",
+		ReportInput: filepath.Join("..", "report.json"),
+		OutputDir:   t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("expected report input traversal to be rejected")
+	}
+}
+
+func TestCSVLoaderRejectsInputParentTraversal(t *testing.T) {
+	_, err := loadIssueTeamRowsFromExport(filepath.Join("..", "issues.csv"))
+	if err == nil {
+		t.Fatal("expected CSV input traversal to be rejected")
+	}
+}
+
+func TestConfigShowRejectsConfigParentTraversal(t *testing.T) {
+	err := runConfigShow(Config{
+		Command:    "config show",
+		ConfigPath: filepath.Join("..", "config.yaml"),
+	})
+	if err == nil {
+		t.Fatal("expected config path traversal to be rejected")
+	}
+}
+
+func TestEnsureInteractiveMigrateProfileSelectedRejectsConfigParentTraversal(t *testing.T) {
+	cfg := Config{
+		Command:    "migrate",
+		ConfigPath: filepath.Join("..", "config.yaml"),
+	}
+	if err := ensureInteractiveMigrateProfileSelected(&cfg); err == nil {
+		t.Fatal("expected config path traversal to be rejected")
+	}
+}
+
+func TestSaveProfileStoreRejectsConfigParentTraversal(t *testing.T) {
+	err := saveProfileStore(filepath.Join("..", "config.yaml"), ProfileStore{
+		CurrentProfile: "default",
+		Profiles:       map[string]SavedProfile{"default": {}},
+	})
+	if err == nil {
+		t.Fatal("expected config path traversal to be rejected")
+	}
+}
+
 func TestSourceNeedsAuthWhenPasswordMissing(t *testing.T) {
 	if !sourceNeedsAuth(Config{
 		SourceBaseURL:  "https://source.example.com/jira",
@@ -230,6 +285,17 @@ func TestLoadMigrateStateFromPreparedArtifacts(t *testing.T) {
 	}
 	if state.ResourcePlans[0].WeeklyHours == nil || *state.ResourcePlans[0].WeeklyHours != 40 {
 		t.Fatalf("expected weekly hours 40, got %#v", state.ResourcePlans[0].WeeklyHours)
+	}
+}
+
+func TestLoadMigrationStateRejectsOutputDirParentTraversal(t *testing.T) {
+	_, findings := loadMigrationState(Config{
+		Command:   "migrate",
+		Phase:     phaseMigrate,
+		OutputDir: filepath.Join("..", "out"),
+	})
+	if len(findings) == 0 || findings[0].Code != "invalid_output_dir" || findings[0].Severity != SeverityError {
+		t.Fatalf("expected invalid output dir finding, got %#v", findings)
 	}
 }
 

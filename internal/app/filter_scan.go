@@ -392,7 +392,12 @@ func splitJQLListValues(raw string) []string {
 }
 
 func writeFilterTeamClauseExport(cfg Config, rows []FilterTeamClauseRow) (string, error) {
-	if err := ensureOutputDir(cfg.OutputDir); err != nil {
+	outputDir, err := cleanOutputDirPath(cfg.OutputDir)
+	if err != nil {
+		return "", err
+	}
+	cfg.OutputDir = outputDir
+	if err := ensureOutputDir(outputDir); err != nil {
 		return "", err
 	}
 
@@ -438,7 +443,7 @@ func writeFilterTeamClauseExport(cfg Config, rows []FilterTeamClauseRow) (string
 	if err := writer.Error(); err != nil {
 		return "", err
 	}
-	if err := pruneOutputFamily(cfg.OutputDir, name, outputRetentionLimit); err != nil {
+	if err := pruneOutputFamily(outputDir, name, outputRetentionLimit); err != nil {
 		return "", err
 	}
 	return path, nil

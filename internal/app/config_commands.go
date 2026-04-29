@@ -15,6 +15,11 @@ type configShowOutput struct {
 }
 
 func runConfigShow(cfg Config) error {
+	configPath, err := cleanInputFilePath("config", cfg.ConfigPath)
+	if err != nil {
+		return err
+	}
+	cfg.ConfigPath = configPath
 	store, err := loadProfileStore(cfg.ConfigPath)
 	if err != nil {
 		return err

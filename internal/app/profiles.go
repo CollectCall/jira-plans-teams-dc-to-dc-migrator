@@ -58,7 +58,11 @@ func defaultConfigPath() string {
 func loadProfileStore(path string) (ProfileStore, error) {
 	store := ProfileStore{Profiles: map[string]SavedProfile{}}
 
-	file, err := os.Open(path)
+	configPath, err := cleanInputFilePath("config", path)
+	if err != nil {
+		return store, err
+	}
+	file, err := os.OpenInRoot(filepath.Dir(configPath), filepath.Base(configPath))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return store, nil
@@ -109,7 +113,11 @@ func loadProfileStore(path string) (ProfileStore, error) {
 }
 
 func saveProfileStore(path string, store ProfileStore) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	configPath, err := cleanInputFilePath("config", path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return err
 	}
 
@@ -132,7 +140,7 @@ func saveProfileStore(path string, store ProfileStore) error {
 	}
 
 	content := strings.Join(lines, "\n") + "\n"
-	return os.WriteFile(path, []byte(content), 0o600)
+	return os.WriteFile(configPath, []byte(content), 0o600)
 }
 
 func applySavedProfile(cfg *Config, profile SavedProfile) {

@@ -147,6 +147,12 @@ func runInteractiveMigrateSession(cfg Config) int {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return ExitFailure
 	}
+	var err error
+	cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return ExitFailure
+	}
 	refreshInteractiveMigrateReferenceExportScopes(&cfg)
 
 	for {
@@ -188,6 +194,11 @@ func runInteractiveMigrateSession(cfg Config) int {
 			if !proceed {
 				return exitCodeFor(report)
 			}
+			cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				return ExitFailure
+			}
 			if err := showPreparedPostMigrationFilesFromCurrentOutputs(cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
@@ -195,6 +206,11 @@ func runInteractiveMigrateSession(cfg Config) int {
 			cfg.Phase = phasePostMigrate
 			cfg.PhaseExplicit = true
 		case phasePostMigrate:
+			cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				return ExitFailure
+			}
 			report, _, err := runInteractiveApplyPhase(cfg, phasePostMigrate)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -212,6 +228,11 @@ func refreshInteractiveMigrateReferenceExportScopes(cfg *Config) {
 	if cfg == nil || cfg.Command != "migrate" {
 		return
 	}
+	if outputDir, err := cleanOutputDirPath(cfg.OutputDir); err == nil {
+		cfg.OutputDir = outputDir
+	} else {
+		return
+	}
 	applyDefaultReferenceExportScopes(cfg)
 }
 
@@ -220,6 +241,11 @@ func ensureInteractiveMigrateProfileSelected(cfg *Config) error {
 		return nil
 	}
 
+	configPath, err := cleanInputFilePath("config", cfg.ConfigPath)
+	if err != nil {
+		return err
+	}
+	cfg.ConfigPath = configPath
 	store, err := loadProfileStore(cfg.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("loading config store: %w", err)
@@ -263,6 +289,11 @@ func runInteractiveReadOnlyPhase(cfg Config, phase string) (Report, error) {
 	phaseCfg.Phase = phase
 	phaseCfg.DryRun = true
 	phaseCfg.OutputTimestamp = interactivePhaseOutputTimestamp(phase)
+	var err error
+	phaseCfg.OutputDir, err = cleanOutputDirPath(phaseCfg.OutputDir)
+	if err != nil {
+		return Report{}, err
+	}
 
 	printPhaseBoundary(os.Stdout, phase, "Preparing read-only artifacts", []string{
 		"Fetching source and target data and writing review files. No Jira writes will be sent.",
@@ -277,6 +308,11 @@ func runInteractiveReadOnlyPhase(cfg Config, phase string) (Report, error) {
 }
 
 func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
+	var err error
+	cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir)
+	if err != nil {
+		return Report{}, false, err
+	}
 	stamp := interactivePhaseOutputTimestamp(phase)
 
 	for {
@@ -284,6 +320,10 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 		previewCfg.Phase = phase
 		previewCfg.DryRun = true
 		previewCfg.OutputTimestamp = stamp
+		previewCfg.OutputDir, err = cleanOutputDirPath(previewCfg.OutputDir)
+		if err != nil {
+			return Report{}, false, err
+		}
 
 		printPhaseBoundary(os.Stdout, phase, "Previewing phase", []string{
 			"Building the plan for this phase. No Jira writes will be sent.",
@@ -291,6 +331,10 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 		state, findings := loadMigrationState(previewCfg)
 		_, previewFindings, previewActions := executeMigrationWithState(previewCfg, false, state, findings)
 		preview := populateExecutionReport(newReport(previewCfg), state, previewFindings, previewActions, "apply_preview", "Preview generated before apply mode confirmation")
+		previewCfg.OutputDir, err = cleanOutputDirPath(previewCfg.OutputDir)
+		if err != nil {
+			return Report{}, false, err
+		}
 		previewPaths, err := writeReportOutputs(previewCfg, preview)
 		if err != nil {
 			return Report{}, false, err
@@ -321,6 +365,10 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 		})
 		state, findings, actions := executeMigrationWithState(applyCfg, true, state, findings)
 		report := finalizeMigrationExecutionReport(newReport(applyCfg), applyCfg, state, findings, actions)
+		applyCfg.OutputDir, err = cleanOutputDirPath(applyCfg.OutputDir)
+		if err != nil {
+			return Report{}, false, err
+		}
 		reportPaths, err := writeReportOutputs(applyCfg, report)
 		if err != nil {
 			return Report{}, false, err
@@ -391,6 +439,11 @@ func showPreparedPostMigrationFilesFromCurrentOutputs(cfg Config) error {
 	postCfg := cfg
 	postCfg.Phase = phasePostMigrate
 	postCfg.DryRun = true
+	var err error
+	postCfg.OutputDir, err = cleanOutputDirPath(postCfg.OutputDir)
+	if err != nil {
+		return err
+	}
 
 	state, findings := loadMigrationState(postCfg)
 	if hasErrors(findings) {
@@ -411,7 +464,12 @@ func interactivePhaseOutputTimestamp(phase string) string {
 func writeReportOutputs(cfg Config, report Report) ([]string, error) {
 	var reportPaths []string
 	if cfg.Command != "report" {
-		if err := ensureOutputDir(cfg.OutputDir); err != nil {
+		outputDir, err := cleanOutputDirPath(cfg.OutputDir)
+		if err != nil {
+			return nil, err
+		}
+		cfg.OutputDir = outputDir
+		if err := ensureOutputDir(outputDir); err != nil {
 			return nil, fmt.Errorf("creating output directory: %w", err)
 		}
 		reportBase := strings.ReplaceAll(cfg.Command, " ", "-")
@@ -419,14 +477,14 @@ func writeReportOutputs(cfg Config, report Report) ([]string, error) {
 		if err := writeReport(report, ReportFormatJSON, jsonPath); err != nil {
 			return nil, fmt.Errorf("writing json report: %w", err)
 		}
-		if err := pruneOutputFamily(cfg.OutputDir, fmt.Sprintf("%s-report.%s", reportBase, ReportFormatJSON), outputRetentionLimit); err != nil {
+		if err := pruneOutputFamily(outputDir, fmt.Sprintf("%s-report.%s", reportBase, ReportFormatJSON), outputRetentionLimit); err != nil {
 			return nil, fmt.Errorf("pruning json reports: %w", err)
 		}
 		csvPath := defaultOutputPathForFormat(cfg, ReportFormatCSV)
 		if err := writeReport(report, ReportFormatCSV, csvPath); err != nil {
 			return nil, fmt.Errorf("writing csv report: %w", err)
 		}
-		if err := pruneOutputFamily(cfg.OutputDir, fmt.Sprintf("%s-report.%s", reportBase, ReportFormatCSV), outputRetentionLimit); err != nil {
+		if err := pruneOutputFamily(outputDir, fmt.Sprintf("%s-report.%s", reportBase, ReportFormatCSV), outputRetentionLimit); err != nil {
 			return nil, fmt.Errorf("pruning csv reports: %w", err)
 		}
 		reportPaths = []string{jsonPath, csvPath}

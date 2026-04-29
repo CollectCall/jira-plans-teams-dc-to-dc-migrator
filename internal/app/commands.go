@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -65,7 +66,11 @@ func finalizeMigrationExecutionReport(report Report, cfg Config, state migration
 }
 
 func runReport(cfg Config) (Report, error) {
-	file, err := os.Open(cfg.ReportInput)
+	reportInput, err := cleanInputFilePath("report input", cfg.ReportInput)
+	if err != nil {
+		return Report{}, err
+	}
+	file, err := os.OpenInRoot(filepath.Dir(reportInput), filepath.Base(reportInput))
 	if err != nil {
 		return Report{}, fmt.Errorf("opening report input: %w", err)
 	}
@@ -76,7 +81,12 @@ func runReport(cfg Config) (Report, error) {
 		return Report{}, fmt.Errorf("decoding report input: %w", err)
 	}
 
-	if err := ensureOutputDir(cfg.OutputDir); err != nil {
+	outputDir, err := cleanOutputDirPath(cfg.OutputDir)
+	if err != nil {
+		return Report{}, err
+	}
+	cfg.OutputDir = outputDir
+	if err := ensureOutputDir(outputDir); err != nil {
 		return Report{}, err
 	}
 	if err := writeReport(report, cfg.ReportFormat, defaultOutputPath(cfg)); err != nil {

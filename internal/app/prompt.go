@@ -638,7 +638,7 @@ func runConfigInitWizard(cfg Config) error {
 			Label:        "Default issue correction project scope",
 			Description:  "Choose which Jira projects should be in scope for issue-based correction exports and post-migrate rewrites by default.",
 			InputHelp:    "Type all, or a comma-separated list like ABC,DEF.",
-			ArtifactInfo: "This scope applies to issue/team and Parent Link correction flows. Filters are not project-scoped.",
+			ArtifactInfo: initIssueProjectScopeArtifactInfo(cfg, editingExisting),
 			Default:      nonEmptyDefault(cfg.IssueProjectScope, "all"),
 		})
 		if err != nil {
@@ -703,6 +703,7 @@ func chooseInitProfile(wizard *wizardContext, store ProfileStore, cfg *Config) (
 		profileName := strings.TrimSpace(cfg.Profile)
 		if profile, ok := store.Profiles[profileName]; ok {
 			applySavedProfile(cfg, profile)
+			applyInitSavedProfileDefaults(cfg, profile)
 			return profileName, true, nil
 		}
 		return profileName, false, nil
@@ -734,7 +735,9 @@ func chooseInitProfile(wizard *wizardContext, store ProfileStore, cfg *Config) (
 		if err != nil {
 			return "", false, err
 		}
-		applySavedProfile(cfg, store.Profiles[profileName])
+		profile := store.Profiles[profileName]
+		applySavedProfile(cfg, profile)
+		applyInitSavedProfileDefaults(cfg, profile)
 		return profileName, true, nil
 	}
 
@@ -748,6 +751,22 @@ func chooseInitProfile(wizard *wizardContext, store ProfileStore, cfg *Config) (
 		return "", false, err
 	}
 	return profileName, false, nil
+}
+
+func applyInitSavedProfileDefaults(cfg *Config, profile SavedProfile) {
+	if !cfg.IssueProjectScopeExplicit && strings.TrimSpace(profile.IssueProjectScope) != "" {
+		cfg.IssueProjectScope = profile.IssueProjectScope
+	}
+}
+
+func initIssueProjectScopeArtifactInfo(cfg Config, editingExisting bool) string {
+	lines := []string{"This scope applies to issue/team and Parent Link correction flows. Filters are not project-scoped."}
+	if editingExisting {
+		if scope := strings.TrimSpace(cfg.IssueProjectScope); scope != "" {
+			lines = append(lines, fmt.Sprintf("Previously saved project scope: %s", scope))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func promptForAuth(wizard *wizardContext, label string, username, password *string) error {

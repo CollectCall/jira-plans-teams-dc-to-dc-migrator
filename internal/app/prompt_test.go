@@ -85,6 +85,45 @@ func TestVerifyJiraCredentialsReturnsDecodeFailure(t *testing.T) {
 	}
 }
 
+func TestInitIssueProjectScopeArtifactInfoShowsSavedScopeForExistingProfile(t *testing.T) {
+	info := initIssueProjectScopeArtifactInfo(Config{IssueProjectScope: "ABC,DEF"}, true)
+
+	if !strings.Contains(info, "This scope applies to issue/team and Parent Link correction flows.") {
+		t.Fatalf("expected scope explanation, got %q", info)
+	}
+	if !strings.Contains(info, "Previously saved project scope: ABC,DEF") {
+		t.Fatalf("expected saved scope in artifact info, got %q", info)
+	}
+}
+
+func TestInitIssueProjectScopeArtifactInfoHidesSavedScopeForNewProfile(t *testing.T) {
+	info := initIssueProjectScopeArtifactInfo(Config{IssueProjectScope: "ABC,DEF"}, false)
+
+	if strings.Contains(info, "Previously saved project scope") {
+		t.Fatalf("did not expect saved scope for new profile, got %q", info)
+	}
+}
+
+func TestApplyInitSavedProfileDefaultsRestoresSavedProjectScope(t *testing.T) {
+	cfg := Config{IssueProjectScope: "all"}
+
+	applyInitSavedProfileDefaults(&cfg, SavedProfile{IssueProjectScope: "ABC,DEF"})
+
+	if cfg.IssueProjectScope != "ABC,DEF" {
+		t.Fatalf("expected saved project scope, got %q", cfg.IssueProjectScope)
+	}
+}
+
+func TestApplyInitSavedProfileDefaultsPreservesExplicitProjectScope(t *testing.T) {
+	cfg := Config{IssueProjectScope: "OPS", IssueProjectScopeExplicit: true}
+
+	applyInitSavedProfileDefaults(&cfg, SavedProfile{IssueProjectScope: "ABC,DEF"})
+
+	if cfg.IssueProjectScope != "OPS" {
+		t.Fatalf("expected explicit project scope to be preserved, got %q", cfg.IssueProjectScope)
+	}
+}
+
 func authFixtureValue(parts ...string) string {
 	return strings.Join(parts, "-")
 }

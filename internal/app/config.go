@@ -59,6 +59,7 @@ type Config struct {
 	ReportFormat                ReportFormat
 	TeamScope                   string
 	IssueProjectScope           string
+	IssueProjectScopeExplicit   bool
 	IssueTeamIDsInScope         bool
 	IssueTeamIDsInScopeSet      bool
 	FilterTeamIDsInScope        bool
@@ -121,6 +122,7 @@ func parseConfig(args []string) (Config, error) {
 	}
 	reportFormatFlagProvided := stringFlagProvided(remaining, "--format")
 	profileExplicit := envIsSet(envProfile) || stringFlagProvided(remaining, "--profile")
+	issueProjectScopeExplicit := envIsSet(envIssueProjectScope) || stringFlagProvided(remaining, "--issue-project-scope")
 	fs.StringVar(&reportFormat, "format", reportFormat, "Report format: json or csv")
 
 	cfg.Strict = boolEnv(envStrict, false)
@@ -165,6 +167,7 @@ func parseConfig(args []string) (Config, error) {
 		cfg.IdentityMappingSet = true
 	}
 	cfg.ProfileExplicit = profileExplicit
+	cfg.IssueProjectScopeExplicit = issueProjectScopeExplicit
 
 	if cfg.Command != "init" && cfg.Command != "config show" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" {
 		store, err := loadProfileStore(cfg.ConfigPath)

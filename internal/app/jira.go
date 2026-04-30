@@ -44,6 +44,33 @@ type jiraAPIError struct {
 	AuthDeniedReason string
 }
 
+type jiraHTTPResponse struct {
+	Body          []byte
+	Status        string
+	StatusCode    int
+	RequestURL    string
+	FinalURL      string
+	ContentType   string
+	ContentLength int64
+	JiraUsername  string
+	LoginReason   string
+}
+
+type jiraEmptyCurrentUserResponseError struct {
+	Response jiraHTTPResponse
+}
+
+func (e *jiraEmptyCurrentUserResponseError) Error() string {
+	resp := e.Response
+	return fmt.Sprintf("GET %s returned an empty response body; expected Jira current-user JSON. HTTP status: %s. Final URL: %s. Content-Type: %s. Content-Length: %s. Check that the base URL points to Jira and that no proxy, SSO, or login page is intercepting REST API requests",
+		resp.RequestURL,
+		nonEmptyString(resp.Status, strconv.Itoa(resp.StatusCode)),
+		nonEmptyString(resp.FinalURL, resp.RequestURL),
+		nonEmptyString(resp.ContentType, "not provided"),
+		formatContentLength(resp.ContentLength),
+	)
+}
+
 func (e *jiraAPIError) Error() string {
 	switch e.StatusCode {
 	case http.StatusUnauthorized:
@@ -243,13 +270,17 @@ func (c *jiraClient) ListHierarchyLevels(progress func(current, total int)) ([]H
 }
 
 func (c *jiraClient) CurrentUser() (*CoreJiraUser, error) {
-	body, err := c.doCoreJSON(http.MethodGet, "/rest/api/2/myself", nil, nil)
+	resp, err := c.doCoreJSONResponse(http.MethodGet, "/rest/api/2/myself", nil, nil)
 	if err != nil {
 		return nil, err
 	}
+	body := resp.Body
+	if strings.TrimSpace(string(body)) == "" {
+		return nil, &jiraEmptyCurrentUserResponseError{Response: resp}
+	}
 	var user CoreJiraUser
 	if err := json.Unmarshal(body, &user); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decoding Jira current-user response from %s: %w", resp.RequestURL, err)
 	}
 	return &user, nil
 }
@@ -552,13 +583,13 @@ func listPaged[T any](c *jiraClient, endpoint string, progress func(current, tot
 		query.Set("page", strconv.Itoa(page))
 		query.Set("size", strconv.Itoa(teamsAPIMaxPageSize))
 
-		body, err := c.doJSON(http.MethodGet, endpoint, query, nil)
+		resp, err := c.doJSONResponse(http.MethodGet, endpoint, query, nil)
 		if err != nil {
 			return nil, err
 		}
-		items, err := decodeCollection[T](body)
+		items, err := decodeCollection[T](resp.Body)
 		if err != nil {
-			return nil, fmt.Errorf("decoding %s page %d: %w", endpoint, page, err)
+			return nil, fmt.Errorf("decoding %s page %d: %w; response: %s", endpoint, page, err, jiraResponseSummary(resp))
 		}
 		if len(items) == 0 {
 			break
@@ -590,29 +621,50 @@ func (c *jiraClient) doJSON(method, endpoint string, query url.Values, payload a
 	return c.doJSONAgainstBase(c.baseURL, method, endpoint, query, payload)
 }
 
+func (c *jiraClient) doJSONResponse(method, endpoint string, query url.Values, payload any) (jiraHTTPResponse, error) {
+	return c.doJSONAgainstBaseResponse(c.baseURL, method, endpoint, query, payload)
+}
+
 func (c *jiraClient) doCoreJSON(method, endpoint string, query url.Values, payload any) ([]byte, error) {
 	return c.doJSONAgainstBase(c.instanceBaseURL, method, endpoint, query, payload)
+}
+
+func (c *jiraClient) doCoreJSONResponse(method, endpoint string, query url.Values, payload any) (jiraHTTPResponse, error) {
+	return c.doJSONAgainstBaseResponse(c.instanceBaseURL, method, endpoint, query, payload)
 }
 
 func (c *jiraClient) doJPOJSON(method, endpoint string, query url.Values, payload any) ([]byte, error) {
 	return c.doJSONAgainstBase(c.instanceBaseURL, method, "/rest/jpo-api/1.0"+endpoint, query, payload)
 }
 
+func (c *jiraClient) doJPOJSONResponse(method, endpoint string, query url.Values, payload any) (jiraHTTPResponse, error) {
+	return c.doJSONAgainstBaseResponse(c.instanceBaseURL, method, "/rest/jpo-api/1.0"+endpoint, query, payload)
+}
+
 func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.Values, payload any) ([]byte, error) {
+	resp, err := c.doJSONAgainstBaseResponse(base, method, endpoint, query, payload)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+func (c *jiraClient) doJSONAgainstBaseResponse(base, method, endpoint string, query url.Values, payload any) (jiraHTTPResponse, error) {
 	u, err := url.Parse(base)
 	if err != nil {
-		return nil, fmt.Errorf("invalid base URL: %w", err)
+		return jiraHTTPResponse{}, fmt.Errorf("invalid base URL: %w", err)
 	}
 	u.Path = path.Join(u.Path, endpoint)
 	if query != nil {
 		u.RawQuery = query.Encode()
 	}
+	requestURL := u.String()
 
 	var payloadBytes []byte
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
 		if err != nil {
-			return nil, err
+			return jiraHTTPResponse{}, err
 		}
 		payloadBytes = encoded
 	}
@@ -626,7 +678,7 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 
 		req, err := newValidatedJiraRequest(method, *u, body)
 		if err != nil {
-			return nil, err
+			return jiraHTTPResponse{}, err
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", "teams-migrator/"+currentVersion())
@@ -644,17 +696,31 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 				time.Sleep(retryDelay(attempt, 0))
 				continue
 			}
-			return nil, err
+			return jiraHTTPResponse{}, err
 		}
 
 		data, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if readErr != nil {
-			return nil, readErr
+			return jiraHTTPResponse{}, readErr
+		}
+
+		httpResp := jiraHTTPResponse{
+			Body:          data,
+			Status:        resp.Status,
+			StatusCode:    resp.StatusCode,
+			RequestURL:    requestURL,
+			ContentType:   resp.Header.Get("Content-Type"),
+			ContentLength: resp.ContentLength,
+			JiraUsername:  resp.Header.Get("X-AUSERNAME"),
+			LoginReason:   resp.Header.Get("X-Seraph-LoginReason"),
+		}
+		if resp.Request != nil && resp.Request.URL != nil {
+			httpResp.FinalURL = resp.Request.URL.String()
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return data, nil
+			return httpResp, nil
 		}
 
 		apiErr := &jiraAPIError{
@@ -672,10 +738,10 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 			continue
 		}
 
-		return nil, apiErr
+		return jiraHTTPResponse{}, apiErr
 	}
 
-	return nil, lastErr
+	return jiraHTTPResponse{}, lastErr
 }
 
 func newValidatedJiraRequest(method string, u url.URL, body io.Reader) (*http.Request, error) {
@@ -683,12 +749,7 @@ func newValidatedJiraRequest(method string, u url.URL, body io.Reader) (*http.Re
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(method, "https://jira.invalid/", body)
-	if err != nil {
-		return nil, err
-	}
-	req.URL = parsedURL
-	return req, nil
+	return http.NewRequest(method, parsedURL.String(), body)
 }
 
 func validatedJiraRequestURL(u url.URL) (*url.URL, error) {
@@ -761,6 +822,13 @@ func retryAfterDelay(value string) time.Duration {
 	return 0
 }
 
+func formatContentLength(value int64) string {
+	if value < 0 {
+		return "not provided"
+	}
+	return strconv.FormatInt(value, 10)
+}
+
 func listJPOPaged[T any](c *jiraClient, endpoint string, progress func(current, total int)) ([]T, error) {
 	var all []T
 	for page := 1; ; page++ {
@@ -768,13 +836,13 @@ func listJPOPaged[T any](c *jiraClient, endpoint string, progress func(current, 
 		query.Set("page", strconv.Itoa(page))
 		query.Set("size", strconv.Itoa(jpoAPIMaxPageSize))
 
-		body, err := c.doJPOJSON(http.MethodGet, endpoint, query, nil)
+		resp, err := c.doJPOJSONResponse(http.MethodGet, endpoint, query, nil)
 		if err != nil {
 			return nil, err
 		}
-		items, err := decodeCollection[T](body)
+		items, err := decodeCollection[T](resp.Body)
 		if err != nil {
-			return nil, fmt.Errorf("decoding %s page %d: %w", endpoint, page, err)
+			return nil, fmt.Errorf("decoding %s page %d: %w; response: %s", endpoint, page, err, jiraResponseSummary(resp))
 		}
 		if len(items) == 0 {
 			break
@@ -839,6 +907,26 @@ func truncateText(value string, max int) string {
 	return value[:max-3] + "..."
 }
 
+func responseSnippet(data []byte) string {
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return "empty response body"
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	return truncateText(text, 300)
+}
+
+func jiraResponseSummary(resp jiraHTTPResponse) string {
+	return fmt.Sprintf("status=%s finalURL=%s contentType=%s contentLength=%s jiraUser=%s loginReason=%s",
+		nonEmptyString(resp.Status, strconv.Itoa(resp.StatusCode)),
+		nonEmptyString(resp.FinalURL, resp.RequestURL),
+		nonEmptyString(resp.ContentType, "not provided"),
+		formatContentLength(resp.ContentLength),
+		nonEmptyString(resp.JiraUsername, "not provided"),
+		nonEmptyString(resp.LoginReason, "not provided"),
+	)
+}
+
 func decodeCollection[T any](data []byte) ([]T, error) {
 	var direct []T
 	if err := json.Unmarshal(data, &direct); err == nil {
@@ -862,7 +950,7 @@ func decodeCollection[T any](data []byte) ([]T, error) {
 		return []T{single}, nil
 	}
 
-	return nil, fmt.Errorf("unsupported collection payload")
+	return nil, fmt.Errorf("unsupported collection payload: %s", responseSnippet(data))
 }
 
 func decodeID(data []byte) (int64, error) {

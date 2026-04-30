@@ -16,6 +16,7 @@ func TestPrintSummaryShowsPhaseSectionsForTypedMetadata(t *testing.T) {
 
 	for _, want := range []string{
 		"Execution Phases",
+		"Generated artifacts: 1",
 		"Pre-migrate [completed]",
 		"Migrate [up next]",
 		"Post-migrate [up next]",
@@ -23,6 +24,12 @@ func TestPrintSummaryShowsPhaseSectionsForTypedMetadata(t *testing.T) {
 		"Pre-migrate Preview",
 		"Migrate Preview",
 		"Post-migrate Preview",
+		"Programs compared: 1",
+		"Plans compared: 1",
+		"Teams compared: 2",
+		"Memberships compared: 1",
+		"Teams to create: 1",
+		"Existing teams to reuse: 1",
 		"Issue rewrites prepared: 1",
 		"Parent Link rewrites prepared: 1",
 		"Filter candidates found: 1",
@@ -30,6 +37,16 @@ func TestPrintSummaryShowsPhaseSectionsForTypedMetadata(t *testing.T) {
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("summary did not contain %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{
+		"Create: Red Team",
+		"Team mapping comparison: out/team-mapping.pre-migration.csv",
+		"Teams: Red Team",
+		"Memberships: Red Team",
+	} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("summary contained row sample %q:\n%s", unwanted, rendered)
 		}
 	}
 }
@@ -55,9 +72,16 @@ func TestPrintSummaryShowsPhaseSectionsForDecodedJSONMetadata(t *testing.T) {
 
 	for _, want := range []string{
 		"Execution Phases",
+		"Generated artifacts: 1",
 		"Pre-migrate Preview",
 		"Migrate Preview",
 		"Post-migrate Preview",
+		"Programs compared: 1",
+		"Plans compared: 1",
+		"Teams compared: 2",
+		"Memberships compared: 1",
+		"Teams to create: 1",
+		"Existing teams to reuse: 1",
 		"Issue rewrites prepared: 1",
 		"Parent Link rewrites prepared: 1",
 		"Filter candidates found: 1",
@@ -65,6 +89,175 @@ func TestPrintSummaryShowsPhaseSectionsForDecodedJSONMetadata(t *testing.T) {
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("summary did not contain %q after JSON decode:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestPrintPreMigrateReviewChecklistShowsOnlyUsefulArtifactPaths(t *testing.T) {
+	report := samplePhaseReport()
+	report.Metadata["artifacts"] = []Artifact{
+		{Label: "Team mapping comparison", Path: "out/team-mapping.pre-migration.csv"},
+		{Label: "Source team memberships", Path: "out/source-team-memberships.pre-migration.csv"},
+		{Label: "Team membership mapping comparison", Path: "out/team-membership-mapping.pre-migration.csv"},
+	}
+
+	var out bytes.Buffer
+	printPreMigrateReviewChecklist(&out, report)
+	rendered := out.String()
+
+	for _, want := range []string{
+		"Review Checklist",
+		"Team mapping file: out/team-mapping.pre-migration.csv",
+		"Membership mapping file: out/team-membership-mapping.pre-migration.csv",
+		"Resume later with: teams-migrator migrate --phase migrate",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("checklist did not contain %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{
+		"Team mapping file: Team mapping comparison:",
+		"Membership mapping file: Team membership mapping comparison:",
+	} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("checklist contained noisy label %q:\n%s", unwanted, rendered)
+		}
+	}
+}
+
+func TestPrintInteractivePreMigrateSummaryIsCompactAndCompleted(t *testing.T) {
+	report := samplePhaseReport()
+	report.Source = Endpoint{BaseURL: "https://source.example.com", Mode: "api"}
+	report.Target = Endpoint{BaseURL: "https://target.example.com", Mode: "api"}
+	report.Stats = ReportStats{Actions: 1, Warnings: 2}
+	report.Findings = []Finding{
+		{Severity: SeverityWarning, Code: "same_id_conflict", Message: "A long warning that belongs in the report"},
+		{Severity: SeverityInfo, Code: "pre_migrate_phase_complete", Message: "Pre-migrate phase completed; no remote writes were sent"},
+	}
+	report.Metadata["artifacts"] = []Artifact{
+		{Label: "Team mapping comparison", Path: "out/team-mapping.pre-migration.csv"},
+		{Label: "Source team memberships", Path: "out/source-team-memberships.pre-migration.csv"},
+		{Label: "Team membership mapping comparison", Path: "out/team-membership-mapping.pre-migration.csv"},
+	}
+
+	var out bytes.Buffer
+	printInteractivePreMigrateSummary(&out, report, []string{"out/report.json", "out/report.csv"})
+	rendered := out.String()
+
+	for _, want := range []string{
+		"Pre-migrate phase completed",
+		"Reports: out/report.json, out/report.csv",
+		"Prepared",
+		"Review artifacts: 3",
+		"Migrate Readiness",
+		"Warnings: 2",
+		"Warning details are in the report files.",
+		"Next Steps",
+		"Team mapping: out/team-mapping.pre-migration.csv",
+		"Membership mapping: out/team-membership-mapping.pre-migration.csv",
+		"Resume later with: teams-migrator migrate --phase migrate",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("compact summary did not contain %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{
+		"Pre-migrate Preview",
+		"Execution Phases",
+		"Action Summary",
+		"Post-migrate Readiness",
+		"Notes",
+		"Warnings\n- A long warning",
+		"Team mapping comparison: out/team-mapping.pre-migration.csv",
+	} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("compact summary contained noisy text %q:\n%s", unwanted, rendered)
+		}
+	}
+}
+
+func TestPrintInteractiveMigratePreviewSummaryOnlyShowsMigratePlan(t *testing.T) {
+	report := samplePhaseReport()
+	report.Phase = phaseMigrate
+	report.DryRun = true
+	report.Metadata["artifacts"] = []Artifact{
+		{Label: "Team mapping comparison", Path: "out/team-mapping.pre-migration.csv"},
+		{Label: "Team membership mapping comparison", Path: "out/team-membership-mapping.pre-migration.csv"},
+	}
+
+	var out bytes.Buffer
+	printInteractivePhasePreviewSummary(&out, report, []string{"out/migrate-report.json"})
+	rendered := out.String()
+
+	for _, want := range []string{
+		"Migrate preview ready",
+		"Report: out/migrate-report.json",
+		"Plan",
+		"Teams to create: 1",
+		"Existing teams to reuse: 1",
+		"Status",
+		"Planned actions: 1",
+		"Review Files",
+		"Team mapping: out/team-mapping.pre-migration.csv",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("migrate preview summary did not contain %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{
+		"Execution Phases",
+		"Pre-migrate Preview",
+		"Post-migrate Preview",
+		"Programs compared",
+		"Issue rewrites prepared",
+		"Notes",
+	} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("migrate preview summary contained noisy text %q:\n%s", unwanted, rendered)
+		}
+	}
+}
+
+func TestPrintInteractivePostMigratePreviewSummaryOnlyShowsCorrectionPlan(t *testing.T) {
+	report := samplePhaseReport()
+	report.Phase = phasePostMigrate
+	report.DryRun = true
+	report.Metadata["artifacts"] = []Artifact{
+		{Label: "Issue comparison export", Path: "out/issue-team-comparison.post-migration.csv"},
+		{Label: "Parent-link comparison export", Path: "out/parent-link-comparison.post-migration.csv"},
+		{Label: "Filter JQL comparison export", Path: "out/filter-jql-comparison.post-migration.csv"},
+	}
+
+	var out bytes.Buffer
+	printInteractivePhasePreviewSummary(&out, report, []string{"out/post-report.json"})
+	rendered := out.String()
+
+	for _, want := range []string{
+		"Post-migrate preview ready",
+		"Report: out/post-report.json",
+		"Correction Plan",
+		"Issue rewrites prepared: 1",
+		"Parent Link rewrites prepared: 1",
+		"Filter candidates found: 1",
+		"Status",
+		"Review Files",
+		"out/issue-team-comparison.post-migration.csv",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("post-migrate preview summary did not contain %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{
+		"Execution Phases",
+		"Pre-migrate Preview",
+		"Migrate Preview",
+		"Programs compared",
+		"Existing teams to reuse",
+		"Action Summary",
+		"Notes",
+	} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("post-migrate preview summary contained noisy text %q:\n%s", unwanted, rendered)
 		}
 	}
 }

@@ -117,6 +117,9 @@ func TestNewValidatedJiraRequestPreservesURLAndBody(t *testing.T) {
 	if req.URL.String() != u.String() {
 		t.Fatalf("expected URL %q, got %q", u.String(), req.URL.String())
 	}
+	if req.Host != u.Host {
+		t.Fatalf("expected request Host %q to match URL host, got %q", u.Host, req.Host)
+	}
 	if req.Body == nil {
 		t.Fatal("expected request body to be preserved")
 	}

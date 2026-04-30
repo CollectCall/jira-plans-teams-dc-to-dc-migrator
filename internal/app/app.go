@@ -64,7 +64,7 @@ func Run(args []string) int {
 			preview := populateExecutionReport(newReport(cfg), state, previewFindings, previewActions, "apply_preview", "Preview generated before apply mode confirmation")
 			preview.DryRun = true
 			printSummary(os.Stdout, preview, nil)
-			choice, err := promptApplyAfterPreview()
+			choice, err := promptApplyAfterPreview(cfg.Phase)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
@@ -166,7 +166,6 @@ func runInteractiveMigrateSession(cfg Config) int {
 			if report.Stats.Errors > 0 {
 				return exitCodeFor(report)
 			}
-			printPreMigrateReviewChecklist(os.Stdout, report)
 			proceed, err := promptContinueToMigrationPhase(phaseMigrate)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -303,7 +302,14 @@ func runInteractiveReadOnlyPhase(cfg Config, phase string) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	printSummary(os.Stdout, report, reportPaths)
+	if normalizeMigrationPhase(phase) == phasePreMigrate && report.Stats.Errors == 0 {
+		printPhaseBoundary(os.Stdout, phase, "Review summary", []string{
+			"Pre-migrate completed successfully. Review the generated summary before continuing.",
+		})
+		printInteractivePreMigrateSummary(os.Stdout, report, reportPaths)
+	} else {
+		printSummary(os.Stdout, report, reportPaths)
+	}
 	return report, nil
 }
 
@@ -339,12 +345,13 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 		if err != nil {
 			return Report{}, false, err
 		}
-		printSummary(os.Stdout, preview, previewPaths)
 		if preview.Stats.Errors > 0 {
+			printSummary(os.Stdout, preview, previewPaths)
 			return preview, false, nil
 		}
+		printInteractivePhasePreviewSummary(os.Stdout, preview, previewPaths)
 
-		choice, err := promptApplyAfterPreview()
+		choice, err := promptApplyAfterPreview(cfg.Phase)
 		if err != nil {
 			return Report{}, false, err
 		}
@@ -376,7 +383,11 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 		printPhaseBoundary(os.Stdout, phase, "Apply completed", []string{
 			"The write phase finished. The summary below shows the applied results.",
 		})
-		printSummary(os.Stdout, report, reportPaths)
+		if report.Stats.Errors > 0 {
+			printSummary(os.Stdout, report, reportPaths)
+		} else {
+			printInteractivePhaseApplySummary(os.Stdout, report, reportPaths)
+		}
 		return report, true, nil
 	}
 }
@@ -416,11 +427,11 @@ func printPreMigrateReviewChecklist(w io.Writer, report Report) {
 	fmt.Fprintln(w, theme.style("Review Checklist", theme.titleColor))
 	fmt.Fprintln(w, "- Review team-mapping comparison first for create/reuse/skip decisions.")
 	fmt.Fprintln(w, "- Review team-membership mapping next for user resolution and skipped memberships.")
-	if path := firstArtifactPathContaining(artifacts, "team mapping"); path != "" {
-		fmt.Fprintf(w, "- Team mapping file: %s\n", path)
+	if path := firstArtifactPathContaining(artifacts, "team mapping comparison"); path != "" {
+		fmt.Fprintf(w, "- Team mapping file: %s\n", artifactPathFromSummaryLine(path))
 	}
-	if path := firstArtifactPathContaining(artifacts, "membership"); path != "" {
-		fmt.Fprintf(w, "- Membership mapping file: %s\n", path)
+	if path := firstArtifactPathContaining(artifacts, "team membership mapping comparison"); path != "" {
+		fmt.Fprintf(w, "- Membership mapping file: %s\n", artifactPathFromSummaryLine(path))
 	}
 	fmt.Fprintln(w, "- Resume later with: teams-migrator migrate --phase migrate")
 }
@@ -433,6 +444,13 @@ func firstArtifactPathContaining(artifacts []string, needle string) string {
 		}
 	}
 	return ""
+}
+
+func artifactPathFromSummaryLine(line string) string {
+	if index := strings.LastIndex(line, ": "); index >= 0 {
+		return line[index+2:]
+	}
+	return line
 }
 
 func showPreparedPostMigrationFilesFromCurrentOutputs(cfg Config) error {

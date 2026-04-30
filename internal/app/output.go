@@ -88,7 +88,7 @@ func printSummary(w io.Writer, report Report, reportPaths []string) {
 	if len(artifactLines) > 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, theme.style("Artifacts", theme.titleColor))
-		for _, line := range artifactLines {
+		for _, line := range summaryArtifactLines(artifactLines) {
 			fmt.Fprintf(w, "- %s\n", line)
 		}
 	}
@@ -145,6 +145,277 @@ func printSummary(w io.Writer, report Report, reportPaths []string) {
 			fmt.Fprintf(w, "- %s\n", line)
 		}
 	}
+}
+
+func printInteractivePreMigrateSummary(w io.Writer, report Report, reportPaths []string) {
+	theme := currentUITheme()
+	fmt.Fprintf(w, "%s\n", theme.style("Pre-migrate phase completed", theme.titleColor))
+	fmt.Fprintf(w, "%s %s\n", theme.style("Source:", theme.labelColor), summaryEndpoint(report.Source))
+	fmt.Fprintf(w, "%s %s\n", theme.style("Target:", theme.labelColor), summaryEndpoint(report.Target))
+	if len(reportPaths) == 1 {
+		fmt.Fprintf(w, "%s %s\n", theme.style("Report:", theme.labelColor), reportPaths[0])
+	} else if len(reportPaths) > 1 {
+		fmt.Fprintf(w, "%s %s\n", theme.style("Reports:", theme.labelColor), strings.Join(reportPaths, ", "))
+	}
+
+	artifacts := summaryArtifacts(report)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, theme.style("Prepared", theme.titleColor))
+	if len(artifacts) > 0 {
+		fmt.Fprintf(w, "- Review artifacts: %d\n", len(artifacts))
+	}
+	if imd := metadataIMD(report); imd != nil {
+		for _, line := range preMigratePreviewLines(imd) {
+			fmt.Fprintf(w, "- %s\n", line)
+		}
+	}
+
+	if imd := metadataIMD(report); imd != nil {
+		if lines := migratePreviewLines(imd); len(lines) > 0 {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, theme.style("Migrate Readiness", theme.titleColor))
+			for _, line := range lines {
+				fmt.Fprintf(w, "- %s\n", line)
+			}
+		}
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, theme.style("Status", theme.titleColor))
+	fmt.Fprintf(w, "- Warnings: %d\n", report.Stats.Warnings)
+	fmt.Fprintf(w, "- Errors: %d\n", report.Stats.Errors)
+	if report.Stats.Warnings > 0 {
+		fmt.Fprintln(w, "- Warning details are in the report files.")
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, theme.style("Next Steps", theme.titleColor))
+	fmt.Fprintln(w, "- Review team mapping decisions before applying the migrate phase.")
+	if path := firstArtifactPathContaining(artifacts, "team mapping comparison"); path != "" {
+		fmt.Fprintf(w, "- Team mapping: %s\n", artifactPathFromSummaryLine(path))
+	}
+	if path := firstArtifactPathContaining(artifacts, "team membership mapping comparison"); path != "" {
+		fmt.Fprintf(w, "- Membership mapping: %s\n", artifactPathFromSummaryLine(path))
+	}
+	fmt.Fprintln(w, "- Resume later with: teams-migrator migrate --phase migrate")
+}
+
+func printInteractivePhasePreviewSummary(w io.Writer, report Report, reportPaths []string) {
+	switch reportPhase(report) {
+	case phaseMigrate:
+		printInteractiveMigratePreviewSummary(w, report, reportPaths)
+	case phasePostMigrate:
+		printInteractivePostMigratePreviewSummary(w, report, reportPaths)
+	default:
+		printSummary(w, report, reportPaths)
+	}
+}
+
+func printInteractivePhaseApplySummary(w io.Writer, report Report, reportPaths []string) {
+	switch reportPhase(report) {
+	case phaseMigrate:
+		printInteractiveMigrateApplySummary(w, report, reportPaths)
+	case phasePostMigrate:
+		printInteractivePostMigrateApplySummary(w, report, reportPaths)
+	default:
+		printSummary(w, report, reportPaths)
+	}
+}
+
+func printInteractiveMigratePreviewSummary(w io.Writer, report Report, reportPaths []string) {
+	theme := currentUITheme()
+	fmt.Fprintf(w, "%s\n", theme.style("Migrate preview ready", theme.titleColor))
+	printSummaryReportPaths(w, reportPaths)
+
+	if imd := metadataIMD(report); imd != nil {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, theme.style("Plan", theme.titleColor))
+		for _, line := range migratePreviewLines(imd) {
+			fmt.Fprintf(w, "- %s\n", line)
+		}
+	}
+
+	if lines := summarizeResourceActions(report.Actions); len(lines) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, theme.style("Memberships", theme.titleColor))
+		for _, line := range lines {
+			fmt.Fprintf(w, "- %s\n", line)
+		}
+	}
+
+	printCompactStatus(w, report, "Planned actions")
+	printMappingFileNextSteps(w, report)
+}
+
+func printInteractiveMigrateApplySummary(w io.Writer, report Report, reportPaths []string) {
+	theme := currentUITheme()
+	fmt.Fprintf(w, "%s\n", theme.style("Migrate phase completed", theme.titleColor))
+	printSummaryReportPaths(w, reportPaths)
+
+	if lines := summarizeMigrationActions(report.Actions); len(lines) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, theme.style("Applied", theme.titleColor))
+		for _, line := range lines {
+			fmt.Fprintf(w, "- %s\n", line)
+		}
+	} else {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, theme.style("Applied", theme.titleColor))
+		fmt.Fprintln(w, "- No destination teams or memberships were created.")
+	}
+
+	if imd := metadataIMD(report); imd != nil {
+		if lines := postMigratePreviewLines(imd); len(lines) > 0 {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, theme.style("Prepared For Post-migrate", theme.titleColor))
+			for _, line := range lines {
+				fmt.Fprintf(w, "- %s\n", line)
+			}
+		}
+	}
+
+	printCompactStatus(w, report, "Applied actions")
+	if artifacts := summaryArtifacts(report); len(artifacts) > 0 {
+		if path := firstArtifactPathContaining(artifacts, "migration team id mapping"); path != "" {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, theme.style("Next Steps", theme.titleColor))
+			fmt.Fprintf(w, "- Team ID mapping: %s\n", artifactPathFromSummaryLine(path))
+			fmt.Fprintln(w, "- Continue to post-migrate when you are ready to update Jira references.")
+		}
+	}
+}
+
+func printInteractivePostMigratePreviewSummary(w io.Writer, report Report, reportPaths []string) {
+	theme := currentUITheme()
+	fmt.Fprintf(w, "%s\n", theme.style("Post-migrate preview ready", theme.titleColor))
+	printSummaryReportPaths(w, reportPaths)
+
+	if imd := metadataIMD(report); imd != nil {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, theme.style("Correction Plan", theme.titleColor))
+		for _, line := range postMigratePreviewLines(imd) {
+			fmt.Fprintf(w, "- %s\n", line)
+		}
+	}
+
+	printCompactStatus(w, report, "")
+	printPostMigrateReviewFiles(w, report)
+}
+
+func printInteractivePostMigrateApplySummary(w io.Writer, report Report, reportPaths []string) {
+	theme := currentUITheme()
+	fmt.Fprintf(w, "%s\n", theme.style("Post-migrate phase completed", theme.titleColor))
+	printSummaryReportPaths(w, reportPaths)
+
+	if lines := summarizePostMigrateActions(report.Actions); len(lines) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, theme.style("Applied", theme.titleColor))
+		for _, line := range lines {
+			fmt.Fprintf(w, "- %s\n", line)
+		}
+	}
+
+	printCompactStatus(w, report, "")
+	printPostMigrateReviewFiles(w, report)
+}
+
+func printSummaryReportPaths(w io.Writer, reportPaths []string) {
+	theme := currentUITheme()
+	if len(reportPaths) == 1 {
+		fmt.Fprintf(w, "%s %s\n", theme.style("Report:", theme.labelColor), reportPaths[0])
+	} else if len(reportPaths) > 1 {
+		fmt.Fprintf(w, "%s %s\n", theme.style("Reports:", theme.labelColor), strings.Join(reportPaths, ", "))
+	}
+}
+
+func printCompactStatus(w io.Writer, report Report, actionLabel string) {
+	theme := currentUITheme()
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, theme.style("Status", theme.titleColor))
+	if actionLabel != "" {
+		fmt.Fprintf(w, "- %s: %d\n", actionLabel, countMigrationActions(report.Actions))
+	}
+	fmt.Fprintf(w, "- Warnings: %d\n", report.Stats.Warnings)
+	fmt.Fprintf(w, "- Errors: %d\n", report.Stats.Errors)
+}
+
+func printMappingFileNextSteps(w io.Writer, report Report) {
+	theme := currentUITheme()
+	artifacts := summaryArtifacts(report)
+	if len(artifacts) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, theme.style("Review Files", theme.titleColor))
+	if path := firstArtifactPathContaining(artifacts, "team mapping"); path != "" {
+		fmt.Fprintf(w, "- Team mapping: %s\n", artifactPathFromSummaryLine(path))
+	}
+	if path := firstArtifactPathContaining(artifacts, "membership"); path != "" {
+		fmt.Fprintf(w, "- Membership mapping: %s\n", artifactPathFromSummaryLine(path))
+	}
+}
+
+func printPostMigrateReviewFiles(w io.Writer, report Report) {
+	theme := currentUITheme()
+	artifacts := summaryArtifacts(report)
+	lines := []string{}
+	for _, needle := range []string{"issue comparison", "parent-link comparison", "filter jql comparison"} {
+		if path := firstArtifactPathContaining(artifacts, needle); path != "" {
+			lines = append(lines, artifactPathFromSummaryLine(path))
+		}
+	}
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, theme.style("Review Files", theme.titleColor))
+	for _, line := range lines {
+		fmt.Fprintf(w, "- %s\n", line)
+	}
+}
+
+func summarizePostMigrateActions(actions []Action) []string {
+	counts := map[string]int{}
+	for _, action := range actions {
+		switch action.Kind {
+		case "post_migrate_issue_update":
+			counts["Issue updates "+action.Status]++
+		case "post_migrate_parent_link_update":
+			counts["Parent Link updates "+action.Status]++
+		case "post_migrate_filter_update":
+			counts["Filter updates "+action.Status]++
+		}
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("%s: %d", key, counts[key]))
+	}
+	return lines
+}
+
+func summarizeResourceActions(actions []Action) []string {
+	counts := map[string]int{}
+	for _, action := range actions {
+		if action.Kind != "resource" {
+			continue
+		}
+		counts[action.Status]++
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, fmt.Sprintf("Memberships %s: %d", key, counts[key]))
+	}
+	return lines
 }
 
 func migrationActionCountLabel(report Report) string {
@@ -232,6 +503,13 @@ func summaryArtifacts(report Report) []string {
 		}
 	}
 	return uniqueStrings(lines)
+}
+
+func summaryArtifactLines(artifacts []string) []string {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("Generated artifacts: %d", len(artifacts))}
 }
 
 func summarizeMigrationActions(actions []Action) []string {
@@ -507,13 +785,13 @@ func metadataIMD(report Report) map[string]any {
 
 func preMigratePreviewLines(imd map[string]any) []string {
 	lines := []string{}
-	lines = appendPreviewExamples(lines, "Programs", programPreviewRows(imd["programs"]), 1)
-	lines = appendPreviewExamples(lines, "Plans", planPreviewRows(imd["plans"]), 1)
-	lines = appendPreviewExamples(lines, "Teams", teamPreviewRows(imd["teams"]), 1)
-	lines = appendPreviewExamples(lines, "Memberships", membershipPreviewRows(imd["resources"]), 1)
-	lines = appendPreviewExamples(lines, "Issue export", issuePreviewRows(imd["issues"]), 1)
-	lines = appendPreviewExamples(lines, "Parent Link export", parentLinkPreviewRows(imd["parentLinks"]), 1)
-	lines = appendPreviewExamples(lines, "Filter scan", filterPreviewRows(imd["filters"]), 1)
+	lines = appendPreviewCount(lines, "Programs compared", metadataCollectionCount(imd["programs"]))
+	lines = appendPreviewCount(lines, "Plans compared", metadataCollectionCount(imd["plans"]))
+	lines = appendPreviewCount(lines, "Teams compared", len(teamMappingsFromValue(imd["teams"])))
+	lines = appendPreviewCount(lines, "Memberships compared", metadataCollectionCount(imd["resources"]))
+	lines = appendPreviewCount(lines, "Issue/team export rows", len(issueTeamRowsFromValue(imd["issues"])))
+	lines = appendPreviewCount(lines, "Parent Link export rows", len(parentLinkRowsFromValue(imd["parentLinks"])))
+	lines = appendPreviewCount(lines, "Filter team matches", len(filterTeamClauseRowsFromValue(imd["filters"])))
 	return lines
 }
 
@@ -523,16 +801,24 @@ func migratePreviewLines(imd map[string]any) []string {
 		return nil
 	}
 
+	createCount := 0
+	reuseCount := 0
+	skipCount := 0
+	for _, mapping := range mappings {
+		switch mapping.Decision {
+		case "add", "created":
+			createCount++
+		case "merge":
+			reuseCount++
+		case "skipped", "conflict":
+			skipCount++
+		}
+	}
+
 	lines := []string{}
-	lines = appendTeamMappingPreview(lines, "Create", mappings, func(mapping TeamMapping) bool {
-		return mapping.Decision == "add" || mapping.Decision == "created"
-	}, 3)
-	lines = appendTeamMappingPreview(lines, "Reuse", mappings, func(mapping TeamMapping) bool {
-		return mapping.Decision == "merge"
-	}, 2)
-	lines = appendTeamMappingPreview(lines, "Skip", mappings, func(mapping TeamMapping) bool {
-		return mapping.Decision == "skipped" || mapping.Decision == "conflict"
-	}, 2)
+	lines = appendPreviewCount(lines, "Teams to create", createCount)
+	lines = appendPreviewCount(lines, "Existing teams to reuse", reuseCount)
+	lines = appendPreviewCount(lines, "Teams skipped or conflicted", skipCount)
 	if len(lines) == 0 {
 		return []string{"No destination team creation is required."}
 	}
@@ -618,6 +904,36 @@ func postMigratePreviewLines(imd map[string]any) []string {
 		}
 	}
 	return lines
+}
+
+func appendPreviewCount(lines []string, label string, count int) []string {
+	if count <= 0 {
+		return lines
+	}
+	return append(lines, fmt.Sprintf("%s: %d", label, count))
+}
+
+func metadataCollectionCount(value any) int {
+	switch rows := value.(type) {
+	case []any:
+		return len(rows)
+	case []ProgramMapping:
+		return len(rows)
+	case []PlanMapping:
+		return len(rows)
+	case []TeamMapping:
+		return len(rows)
+	case []ResourcePlan:
+		return len(rows)
+	case []IssueTeamRow:
+		return len(rows)
+	case []ParentLinkRow:
+		return len(rows)
+	case []FilterTeamClauseRow:
+		return len(rows)
+	default:
+		return 0
+	}
 }
 
 func programPreviewRows(value any) []string {

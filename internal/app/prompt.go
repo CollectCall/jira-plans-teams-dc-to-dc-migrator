@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
@@ -811,27 +812,66 @@ func promptForVerifiedAuth(wizard *wizardContext, label, baseURL string, usernam
 			})
 			return nil
 		}
-
+		choices := []string{"retry credentials", "cancel"}
+		if !isJiraAuthenticationFailure(err) {
+			choices = []string{"retry connection test", "retry credentials", "continue without verified connection", "cancel"}
+		}
 		choice, choiceErr := wizard.choice(wizardField{
 			Label:       fmt.Sprintf("%s connection test failed", titleCase(label)),
-			Description: fmt.Sprintf("Could not authenticate against the %s Jira instance.", label),
-			InputHelp:   "Choose retry credentials to enter a new username/password, or cancel to stop this run.",
+			Description: jiraCredentialVerificationFailureDescription(label, err),
+			InputHelp:   jiraCredentialVerificationFailureInputHelp(err),
 			ArtifactInfo: fmt.Sprintf(
 				"Connection test: GET %s/rest/api/2/myself. Error: %v",
 				strings.TrimRight(normalizeInstanceBaseURL(baseURL), "/"),
 				err,
 			),
 			Default: "retry credentials",
-		}, []string{"retry credentials", "cancel"})
+		}, choices)
 		if choiceErr != nil {
 			return choiceErr
 		}
-		if choice == "cancel" {
+		switch choice {
+		case "retry connection test":
+			continue
+		case "continue without verified connection":
+			wizard.noteLines([]string{
+				fmt.Sprintf("Continuing with unverified %s Jira credentials.", label),
+				"The migration run will still fail later if Jira rejects these credentials on the Teams, JPO, or issue APIs.",
+			})
+			return nil
+		case "cancel":
 			return fmt.Errorf("%s Jira credential verification cancelled: %w", label, err)
 		}
 		*username = ""
 		*password = ""
 	}
+}
+
+func jiraCredentialVerificationFailureDescription(label string, err error) string {
+	if isJiraAuthenticationFailure(err) {
+		return fmt.Sprintf("Could not authenticate against the %s Jira instance.", label)
+	}
+	return fmt.Sprintf("Could not verify the %s Jira connection.", label)
+}
+
+func jiraCredentialVerificationFailureInputHelp(err error) string {
+	if isJiraAuthenticationFailure(err) {
+		return "Choose retry credentials to enter a new username/password, or cancel to stop this run."
+	}
+	return "Choose retry connection test to try the same credentials again, retry credentials to enter a new username/password, continue without verified connection to proceed anyway, or cancel to stop this run."
+}
+
+func isJiraAuthenticationFailure(err error) bool {
+	var apiErr *jiraAPIError
+	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+		return true
+	}
+	return false
+}
+
+func isEmptyCurrentUserVerificationResponse(err error) bool {
+	var emptyErr *jiraEmptyCurrentUserResponseError
+	return errors.As(err, &emptyErr)
 }
 
 func cleanRequiredJiraBaseURL(label, raw string) (string, error) {
@@ -1425,21 +1465,34 @@ const (
 	applyPreviewApply applyPreviewChoice = "apply now"
 )
 
-func promptApplyAfterPreview() (applyPreviewChoice, error) {
+func promptApplyAfterPreview(phase string) (applyPreviewChoice, error) {
 	if !isInteractiveTerminal() {
 		return applyPreviewApply, nil
 	}
-	reader := bufio.NewReader(os.Stdin)
-	renderWizardSection("Teams Migrator | Apply", "Choose next step", []string{
+	body := []string{
 		"You are viewing the preview before any Jira writes are sent.",
-		"Stopping here keeps this run in dry-run mode. Applying creates records on the target Jira instance where the plan marked them as add or created.",
-		"Non-shared teams cannot be created by this tool and must already exist in the destination plan before migration.",
+		"Stopping here keeps this run in dry-run mode.",
+	}
+	switch normalizeMigrationPhase(phase) {
+	case phasePostMigrate:
+		body = append(body, "Applying updates Jira issue fields, Parent Link values, and filter JQL where the preview marked corrections as ready.")
+	case phaseMigrate:
+		body = append(body,
+			"Applying creates destination teams and memberships where the plan marked them as add or created.",
+			"Non-shared teams cannot be created by this tool and must already exist in the destination plan before migration.",
+		)
+	default:
+		body = append(body, "Applying executes the write operations shown in the preview.")
+	}
+	body = append(body,
 		"",
 		"Choices:",
 		"1. stop",
 		"2. preview again",
 		"3. apply now",
-	}, "Type the number of your choice and press Enter.", "", "", "Press Enter to stop. Ctrl+C cancels.")
+	)
+	reader := bufio.NewReader(os.Stdin)
+	renderWizardSection("Teams Migrator | Apply", "Choose next step", body, "Type the number of your choice and press Enter.", "", "", "Press Enter to stop. Ctrl+C cancels.")
 	value, err := readLine(reader, string(applyPreviewStop))
 	if err != nil {
 		return applyPreviewStop, err
@@ -1518,54 +1571,23 @@ func showPreparedPostMigrationFilesPreview(state migrationState) error {
 	}
 
 	lines := []string{
-		"The migrate phase prepared the following files for post-migration corrections:",
+		"The migrate phase prepared the inputs needed for the post-migrate preview.",
 	}
 	if artifact, ok := findArtifactByKey(state.Artifacts, "migration_team_id_mapping"); ok {
-		lines = append(lines, fmt.Sprintf("Migration team ID mapping: %s", artifact.Path))
+		lines = append(lines, fmt.Sprintf("Team ID mapping: %s", artifact.Path))
 	}
-	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_issue_team_mapping"); ok {
-		lines = append(lines, fmt.Sprintf("Issue/team correction mapping: %s", artifact.Path))
-	} else {
-		lines = append(lines, "Issue/team correction mapping: not prepared")
+	if state.IssueExportPath != "" {
+		lines = append(lines, fmt.Sprintf("Issue/team source export: %s", state.IssueExportPath))
 	}
-	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_target_issue_snapshot"); ok {
-		lines = append(lines, fmt.Sprintf("Target issue snapshot: %s", artifact.Path))
+	if len(state.ParentLinkRows) > 0 {
+		lines = append(lines, fmt.Sprintf("Parent Link source rows: %d", len(state.ParentLinkRows)))
 	}
-	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_issue_comparison"); ok {
-		lines = append(lines, fmt.Sprintf("Issue comparison export: %s", artifact.Path))
-	}
-	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_parent_link_mapping"); ok {
-		lines = append(lines, fmt.Sprintf("Parent-link correction mapping: %s", artifact.Path))
-	} else if len(state.ParentLinkRows) > 0 {
-		lines = append(lines, "Parent-link correction mapping: not prepared")
-	} else {
-		lines = append(lines, "Parent-link correction mapping: not in scope or no pre-migrate parent-link export was available")
-	}
-	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_target_parent_link_snapshot"); ok {
-		lines = append(lines, fmt.Sprintf("Target Parent Link snapshot: %s", artifact.Path))
-	}
-	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_parent_link_comparison"); ok {
-		lines = append(lines, fmt.Sprintf("Parent-link comparison export: %s", artifact.Path))
-	}
-	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_filter_team_mapping"); ok {
-		lines = append(lines, fmt.Sprintf("Filter/team correction mapping: %s", artifact.Path))
-	} else if len(state.FilterTeamClauseRows) > 0 {
-		lines = append(lines, "Filter/team correction mapping: not prepared")
-	} else {
-		lines = append(lines, "Filter/team correction mapping: not in scope or no pre-migrate filter export was available")
-	}
-	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_target_filter_snapshot"); ok {
-		lines = append(lines, fmt.Sprintf("Target filter snapshot: %s", artifact.Path))
-	}
-	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_filter_target_match"); ok {
-		lines = append(lines, fmt.Sprintf("Filter target match export: %s", artifact.Path))
-	}
-	if artifact, ok := findArtifactByKey(state.Artifacts, "post_migrate_filter_comparison"); ok {
-		lines = append(lines, fmt.Sprintf("Filter JQL comparison export: %s", artifact.Path))
+	if len(state.FilterTeamClauseRows) > 0 {
+		lines = append(lines, fmt.Sprintf("Filter Team-clause rows: %d", len(state.FilterTeamClauseRows)))
 	}
 
 	reader := bufio.NewReader(os.Stdin)
-	renderWizardSection("Teams Migrator | Post-migrate", "Prepared correction files", lines, "", "", "", "Press Enter to continue to the post-migration preview. Ctrl+C cancels.")
+	renderWizardSection("Teams Migrator | Post-migrate", "Prepared correction inputs", lines, "", "", "", "Press Enter to preview post-migrate corrections. Ctrl+C cancels.")
 	_, err := readLine(reader, "")
 	return err
 }

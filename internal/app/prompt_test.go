@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -83,6 +84,66 @@ func TestVerifyJiraCredentialsReturnsDecodeFailure(t *testing.T) {
 	_, err := verifyJiraCredentials(server.URL, accountName, authToken)
 	if err == nil {
 		t.Fatal("expected decode error")
+	}
+	if !strings.Contains(err.Error(), "decoding Jira current-user response") {
+		t.Fatalf("expected decode context, got %v", err)
+	}
+}
+
+func TestVerifyJiraCredentialsReturnsEmptyCurrentUserBodyDiagnostic(t *testing.T) {
+	accountName := authFixtureValue("jira", "account")
+	authToken := authFixtureValue("jira", "token")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	_, err := verifyJiraCredentials(server.URL, accountName, authToken)
+	if err == nil {
+		t.Fatal("expected empty body error")
+	}
+	if !strings.Contains(err.Error(), "empty response body") {
+		t.Fatalf("expected empty body diagnostic, got %v", err)
+	}
+	if !strings.Contains(err.Error(), server.URL+"/rest/api/2/myself") {
+		t.Fatalf("expected request URL in diagnostic, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "HTTP status: 200 OK") {
+		t.Fatalf("expected HTTP status in diagnostic, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "Content-Type: application/json") {
+		t.Fatalf("expected content type in diagnostic, got %v", err)
+	}
+	if strings.Contains(err.Error(), "unexpected end of JSON input") {
+		t.Fatalf("expected friendly diagnostic instead of raw JSON EOF, got %v", err)
+	}
+	if !isEmptyCurrentUserVerificationResponse(err) {
+		t.Fatalf("expected empty current-user response classification, got %T", err)
+	}
+}
+
+func TestJiraCredentialVerificationFailureDescriptionDistinguishesTransportFromAuth(t *testing.T) {
+	authErr := &jiraAPIError{StatusCode: http.StatusUnauthorized}
+	if got := jiraCredentialVerificationFailureDescription("source", authErr); !strings.Contains(got, "Could not authenticate") {
+		t.Fatalf("expected auth failure description, got %q", got)
+	}
+
+	transportErr := errors.New("GET /rest/api/2/myself returned an empty response body")
+	if got := jiraCredentialVerificationFailureDescription("source", transportErr); !strings.Contains(got, "Could not verify") {
+		t.Fatalf("expected connection verification description, got %q", got)
+	}
+}
+
+func TestJiraCredentialVerificationFailureInputHelpAllowsContinueForNonAuthFailures(t *testing.T) {
+	authErr := &jiraAPIError{StatusCode: http.StatusUnauthorized}
+	if got := jiraCredentialVerificationFailureInputHelp(authErr); strings.Contains(got, "continue without verified connection") {
+		t.Fatalf("did not expect continue option for auth failure, got %q", got)
+	}
+
+	transportErr := errors.New("GET /rest/api/2/myself returned an empty response body")
+	if got := jiraCredentialVerificationFailureInputHelp(transportErr); !strings.Contains(got, "continue without verified connection") {
+		t.Fatalf("expected continue option for non-auth verification failure, got %q", got)
 	}
 }
 

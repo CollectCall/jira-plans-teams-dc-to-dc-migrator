@@ -33,6 +33,8 @@ type jiraClient struct {
 	username        string
 	password        string
 	httpClient      *http.Client
+	fieldsCache     []JiraField
+	fieldsLoaded    bool
 }
 
 type jiraAPIError struct {
@@ -242,6 +244,9 @@ func createResourcePayload(teamID int64, jiraUserID string, weeklyHours *float64
 }
 
 func (c *jiraClient) ListFields() ([]JiraField, error) {
+	if c.fieldsLoaded {
+		return append([]JiraField(nil), c.fieldsCache...), nil
+	}
 	body, err := c.doCoreJSON(http.MethodGet, "/rest/api/2/field", nil, nil)
 	if err != nil {
 		return nil, err
@@ -250,7 +255,9 @@ func (c *jiraClient) ListFields() ([]JiraField, error) {
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return nil, err
 	}
-	return fields, nil
+	c.fieldsCache = append([]JiraField(nil), fields...)
+	c.fieldsLoaded = true
+	return append([]JiraField(nil), fields...), nil
 }
 
 func (c *jiraClient) ListIssueTypes() ([]JiraIssueType, error) {

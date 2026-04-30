@@ -336,6 +336,49 @@ func TestLoadMigrateStateFromPreparedArtifacts(t *testing.T) {
 	}
 }
 
+func TestLoadPostMigrateStateReusesPreparedTargetIssueArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "team-id-mapping.migration.csv"), strings.Join([]string{
+		"Source Team ID,Source Team Name,Source Shareable,Target Team ID,Target Team Name,Migration Status,Reason,Conflict Reason",
+		"101,Platform,true,501,Platform,created,,",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(dir, "issues-with-teams.pre-migration.csv"), strings.Join([]string{
+		"Issue Key,Project Key,Project Name,Project Type,Summary,Source Team IDs,Source Team Names,Teams Field ID",
+		"ABC-1,ABC,Project,software,Summary,101,Platform,customfield_10001",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(dir, "target-issues.snapshot.post-migration.csv"), strings.Join([]string{
+		"Issue Key,Project Key,Project Name,Project Type,Summary,Target Teams Field ID,Current Target Team IDs",
+		"ABC-1,ABC,Project,software,Summary,customfield_20001,101",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(dir, "issue-team-comparison.post-migration.csv"), strings.Join([]string{
+		"Issue Key,Project Key,Project Name,Project Type,Summary,Source Teams Field ID,Target Teams Field ID,Source Team IDs,Source Team Names,Target Team IDs,Current Target Team IDs,Status,Reason",
+		"ABC-1,ABC,Project,software,Summary,customfield_10001,customfield_20001,101,Platform,501,101,ready,",
+	}, "\n"))
+
+	state, findings := loadMigrationState(Config{
+		Command:                 "migrate",
+		Phase:                   phasePostMigrate,
+		OutputDir:               dir,
+		ParentLinkInScope:       false,
+		ParentLinkInScopeSet:    true,
+		FilterTeamIDsInScope:    false,
+		FilterTeamIDsInScopeSet: true,
+	})
+
+	if hasErrors(findings) {
+		t.Fatalf("expected no errors, got %#v", findings)
+	}
+	if len(state.TargetIssueSnapshots) != 1 || state.TargetIssueSnapshots[0].TargetTeamsFieldID != "customfield_20001" {
+		t.Fatalf("expected target issue snapshot loaded from artifact, got %#v", state.TargetIssueSnapshots)
+	}
+	if len(state.IssueComparisons) != 1 || state.IssueComparisons[0].Status != "ready" {
+		t.Fatalf("expected issue comparison loaded from artifact, got %#v", state.IssueComparisons)
+	}
+	if needsPostMigrationTargetArtifactsPreparation(Config{IssueTeamIDsInScope: true, IssueTeamIDsInScopeSet: true}, state) {
+		t.Fatal("did not expect target artifact preparation when comparison artifacts were loaded")
+	}
+}
+
 func TestLoadMigrationStateRejectsOutputDirParentTraversal(t *testing.T) {
 	_, findings := loadMigrationState(Config{
 		Command:   "migrate",
@@ -2783,6 +2826,60 @@ func TestApplyPostMigrationIssueCorrectionsSendsScalarTeamFieldAsString(t *testi
 	}
 	if !strings.Contains(updateBody, `"customfield_16604":"8"`) {
 		t.Fatalf("expected scalar team field update payload to use a string value, got %s", updateBody)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsCanSkipDriftCheck(t *testing.T) {
+	var updateBody string
+	var getRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			getRequests++
+			t.Fatalf("did not expect drift-check GET when skip-post-migrate-drift-checks is enabled")
+		case r.Method == http.MethodPut && r.URL.Path == "/rest/api/2/issue/TP-1":
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read update body: %v", err)
+			}
+			updateBody = string(data)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+	state := migrationState{
+		TeamMappings:  []TeamMapping{{SourceTeamID: 4, TargetTeamID: "8", Decision: "merge"}},
+		IssueTeamRows: []IssueTeamRow{{IssueKey: "TP-1", ProjectKey: "TP", SourceTeamIDs: "4", TeamsFieldID: "customfield_16604"}},
+		IssueComparisons: []PostMigrationIssueComparisonRow{{
+			IssueKey:           "TP-1",
+			ProjectKey:         "TP",
+			SourceTeamsFieldID: "customfield_16604",
+			TargetTeamsFieldID: "customfield_16604",
+			SourceTeamIDs:      "4",
+			TargetTeamIDs:      "8",
+			Status:             "ready",
+		}},
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(Config{SkipPostMigrateDriftChecks: true}, client, &state, &progressTask{})
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+	if getRequests != 0 {
+		t.Fatalf("expected no GET requests, got %d", getRequests)
+	}
+	if len(results) != 1 || results[0].Status != "updated" || !strings.Contains(results[0].Message, "without rechecking") {
+		t.Fatalf("expected trusted prepared comparison update result, got %#v", results)
+	}
+	if !strings.Contains(updateBody, `"customfield_16604":"8"`) {
+		t.Fatalf("expected prepared team field update payload, got %s", updateBody)
 	}
 }
 

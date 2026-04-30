@@ -123,6 +123,213 @@ func loadParentLinkFieldFromExport(path string) (*ParentLinkFieldRow, error) {
 	return row, nil
 }
 
+func loadTargetIssueSnapshotRowsFromExport(path string) ([]TargetIssueSnapshotRow, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) <= 1 {
+		return nil, nil
+	}
+	rows := make([]TargetIssueSnapshotRow, 0, len(records)-1)
+	for _, record := range records[1:] {
+		if len(record) < 7 {
+			return nil, fmt.Errorf("target issue snapshot row has %d column(s), expected 7", len(record))
+		}
+		rows = append(rows, TargetIssueSnapshotRow{
+			IssueKey:             record[0],
+			ProjectKey:           record[1],
+			ProjectName:          record[2],
+			ProjectType:          record[3],
+			Summary:              record[4],
+			TargetTeamsFieldID:   record[5],
+			CurrentTargetTeamIDs: record[6],
+		})
+	}
+	return rows, nil
+}
+
+func loadPostMigrationIssueComparisonRowsFromExport(path string) ([]PostMigrationIssueComparisonRow, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) <= 1 {
+		return nil, nil
+	}
+	rows := make([]PostMigrationIssueComparisonRow, 0, len(records)-1)
+	for _, record := range records[1:] {
+		if len(record) < 13 {
+			return nil, fmt.Errorf("issue comparison row has %d column(s), expected 13", len(record))
+		}
+		rows = append(rows, PostMigrationIssueComparisonRow{
+			IssueKey:             record[0],
+			ProjectKey:           record[1],
+			ProjectName:          record[2],
+			ProjectType:          record[3],
+			Summary:              record[4],
+			SourceTeamsFieldID:   record[5],
+			TargetTeamsFieldID:   record[6],
+			SourceTeamIDs:        record[7],
+			SourceTeamNames:      record[8],
+			TargetTeamIDs:        record[9],
+			CurrentTargetTeamIDs: record[10],
+			Status:               record[11],
+			Reason:               record[12],
+		})
+	}
+	return rows, nil
+}
+
+func loadTargetParentLinkSnapshotRowsFromExport(path string) ([]TargetParentLinkSnapshotRow, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) <= 1 {
+		return nil, nil
+	}
+	rows := make([]TargetParentLinkSnapshotRow, 0, len(records)-1)
+	for _, record := range records[1:] {
+		if len(record) < 9 {
+			return nil, fmt.Errorf("target parent-link snapshot row has %d column(s), expected 9", len(record))
+		}
+		rows = append(rows, TargetParentLinkSnapshotRow{
+			IssueKey:                record[0],
+			IssueID:                 record[1],
+			ProjectKey:              record[2],
+			ProjectName:             record[3],
+			ProjectType:             record[4],
+			Summary:                 record[5],
+			TargetParentLinkFieldID: record[6],
+			CurrentParentIssueID:    record[7],
+			CurrentParentIssueKey:   record[8],
+		})
+	}
+	return rows, nil
+}
+
+func loadPostMigrationParentLinkComparisonRowsFromExport(path string) ([]PostMigrationParentLinkComparisonRow, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) <= 1 {
+		return nil, nil
+	}
+	rows := make([]PostMigrationParentLinkComparisonRow, 0, len(records)-1)
+	for _, record := range records[1:] {
+		if len(record) < 16 {
+			return nil, fmt.Errorf("parent-link comparison row has %d column(s), expected 16", len(record))
+		}
+		rows = append(rows, PostMigrationParentLinkComparisonRow{
+			IssueKey:                record[0],
+			IssueID:                 record[1],
+			ProjectKey:              record[2],
+			ProjectName:             record[3],
+			ProjectType:             record[4],
+			Summary:                 record[5],
+			SourceParentLinkFieldID: record[6],
+			TargetParentLinkFieldID: record[7],
+			SourceParentIssueID:     record[8],
+			SourceParentIssueKey:    record[9],
+			TargetParentIssueID:     record[10],
+			TargetParentIssueKey:    record[11],
+			CurrentParentIssueID:    record[12],
+			CurrentParentIssueKey:   record[13],
+			Status:                  record[14],
+			Reason:                  record[15],
+		})
+	}
+	return rows, nil
+}
+
+func loadTargetFilterSnapshotRowsFromExport(path string) ([]TargetFilterSnapshotRow, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) <= 1 {
+		return nil, nil
+	}
+	rows := make([]TargetFilterSnapshotRow, 0, len(records)-1)
+	for _, record := range records[1:] {
+		if len(record) < 7 {
+			return nil, fmt.Errorf("target filter snapshot row has %d column(s), expected 7", len(record))
+		}
+		rows = append(rows, TargetFilterSnapshotRow{
+			TargetFilterID:   record[0],
+			TargetFilterName: record[1],
+			TargetOwner:      record[2],
+			Description:      record[3],
+			JQL:              record[4],
+			ViewURL:          record[5],
+			SearchURL:        record[6],
+		})
+	}
+	return rows, nil
+}
+
+func loadPostMigrationFilterMatchRowsFromExport(path string) ([]PostMigrationFilterMatchRow, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) <= 1 {
+		return nil, nil
+	}
+	rows := make([]PostMigrationFilterMatchRow, 0, len(records)-1)
+	for _, record := range records[1:] {
+		if len(record) < 8 {
+			return nil, fmt.Errorf("filter target match row has %d column(s), expected 8", len(record))
+		}
+		rows = append(rows, PostMigrationFilterMatchRow{
+			SourceFilterID:   record[0],
+			SourceFilterName: record[1],
+			SourceOwner:      record[2],
+			TargetFilterID:   record[3],
+			TargetFilterName: record[4],
+			TargetOwner:      record[5],
+			Status:           record[6],
+			Reason:           record[7],
+		})
+	}
+	return rows, nil
+}
+
+func loadPostMigrationFilterComparisonRowsFromExport(path string) ([]PostMigrationFilterComparisonRow, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) <= 1 {
+		return nil, nil
+	}
+	rows := make([]PostMigrationFilterComparisonRow, 0, len(records)-1)
+	for _, record := range records[1:] {
+		if len(record) < 14 {
+			return nil, fmt.Errorf("filter comparison row has %d column(s), expected 14", len(record))
+		}
+		rows = append(rows, PostMigrationFilterComparisonRow{
+			SourceFilterID:     record[0],
+			SourceFilterName:   record[1],
+			SourceOwner:        record[2],
+			SourceJQL:          record[3],
+			SourceClause:       record[4],
+			SourceTeamID:       record[5],
+			TargetFilterID:     record[6],
+			TargetFilterName:   record[7],
+			TargetOwner:        record[8],
+			TargetTeamID:       record[9],
+			CurrentTargetJQL:   record[10],
+			RewrittenTargetJQL: record[11],
+			Status:             record[12],
+			Reason:             record[13],
+		})
+	}
+	return rows, nil
+}
+
 func loadTeamMappingsFromExport(path string) ([]TeamMapping, error) {
 	records, err := readCSVRecordsFromFile(path)
 	if err != nil {

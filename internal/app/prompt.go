@@ -1533,6 +1533,35 @@ func promptProceedToPostMigrationCorrections() (bool, error) {
 	}
 }
 
+func promptPostMigrateDriftCheckMode() (bool, error) {
+	if !isInteractiveTerminal() {
+		return false, nil
+	}
+	reader := bufio.NewReader(os.Stdin)
+	return readPostMigrateDriftCheckMode(reader)
+}
+
+func readPostMigrateDriftCheckMode(reader *bufio.Reader) (bool, error) {
+	renderWizardSection("Teams Migrator | Post-migrate", "Re-check target state?", []string{
+		"Choose before the destination scan starts so the remaining post-migrate preparation and apply can run unattended.",
+		"If the target Jira instance is frozen or read-only for users, you can trust the prepared comparison artifacts.",
+		"",
+		"Choices:",
+		"1. yes, verify each issue/filter before update",
+		"2. no, trust the prepared comparison artifacts",
+	}, "Type the number of your choice and press Enter.", "", "", "Press Enter to verify before update. Ctrl+C cancels.")
+	value, err := readLine(reader, "1")
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "2", "n", "no", "trust", "skip":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
 func promptContinueToMigrationPhase(nextPhase string) (bool, error) {
 	if !isInteractiveTerminal() {
 		return false, nil

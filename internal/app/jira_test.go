@@ -32,6 +32,33 @@ func TestJiraClientSendsBasicAuth(t *testing.T) {
 	}
 }
 
+func TestJiraClientCachesFieldsPerClient(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/rest/api/2/field" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"customfield_10001","name":"Team","custom":true}]`))
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+	if _, err := client.ListFields(); err != nil {
+		t.Fatalf("first ListFields returned error: %v", err)
+	}
+	if _, err := client.ListFields(); err != nil {
+		t.Fatalf("second ListFields returned error: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("expected one field request, got %d", requests)
+	}
+}
+
 func TestNewJiraClientValidatesBaseURL(t *testing.T) {
 	tests := []struct {
 		name    string

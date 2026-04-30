@@ -52,6 +52,26 @@ func TestVerifyJiraCredentialsUsesCurrentUserEndpoint(t *testing.T) {
 	}
 }
 
+func TestReadPostMigrateDriftCheckModeCanTrustPreparedArtifacts(t *testing.T) {
+	skip, err := readPostMigrateDriftCheckMode(bufio.NewReader(strings.NewReader("2\n")))
+	if err != nil {
+		t.Fatalf("readPostMigrateDriftCheckMode returned error: %v", err)
+	}
+	if !skip {
+		t.Fatal("expected choice 2 to skip post-migrate drift checks")
+	}
+}
+
+func TestReadPostMigrateDriftCheckModeDefaultsToRecheck(t *testing.T) {
+	skip, err := readPostMigrateDriftCheckMode(bufio.NewReader(strings.NewReader("\n")))
+	if err != nil {
+		t.Fatalf("readPostMigrateDriftCheckMode returned error: %v", err)
+	}
+	if skip {
+		t.Fatal("expected default choice to keep post-migrate drift checks")
+	}
+}
+
 func TestVerifyJiraCredentialsReturnsAuthFailure(t *testing.T) {
 	accountName := authFixtureValue("jira", "account")
 	authToken := authFixtureValue("invalid", "token")

@@ -1713,6 +1713,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --phase                 Migration phase for migrate: pre-migrate, migrate, or post-migrate")
 	fmt.Fprintln(w, "  --strict                Exit non-zero on warnings or errors")
 	fmt.Fprintln(w, "  --apply                 Execute writes for migrate")
+	fmt.Fprintln(w, "  --skip-post-migrate-drift-checks")
+	fmt.Fprintln(w, "                          Trust prepared post-migration comparisons and skip per-row rechecks")
 	fmt.Fprintln(w, "  --no-input              Disable interactive prompts")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Report command flags:")

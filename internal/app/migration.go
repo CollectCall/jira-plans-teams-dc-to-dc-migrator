@@ -1603,6 +1603,9 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		postState, postFindings := loadPostMigrateInputs(cfg, state, sourceClient, progress)
 		state = postState
 		findings = append(findings, postFindings...)
+		postState, postFindings = loadPostMigrateTargetArtifactsFromExports(cfg, state, progress)
+		state = postState
+		findings = append(findings, postFindings...)
 	}
 
 	return state, findings
@@ -1755,7 +1758,128 @@ func loadPostMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTra
 	var inputFindings []Finding
 	state, inputFindings = loadPostMigrateInputs(cfg, state, nil, progress)
 	findings = append(findings, inputFindings...)
+	state, inputFindings = loadPostMigrateTargetArtifactsFromExports(cfg, state, progress)
+	findings = append(findings, inputFindings...)
 	return state, findings
+}
+
+func loadPostMigrateTargetArtifactsFromExports(cfg Config, state migrationState, progress *progressTracker) (migrationState, []Finding) {
+	findings := []Finding{}
+
+	if issueTeamCorrectionsInScope(cfg) {
+		if path, ok := latestOutputFamilyPath(cfg.OutputDir, "target-issues.snapshot.post-migration.csv"); ok {
+			progressStart(progress, "Loading target issue snapshot")
+			rows, err := loadTargetIssueSnapshotRowsFromExport(path)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_issue_snapshot_reuse_failed", fmt.Sprintf("Could not reuse target issue snapshot %s: %v", path, err)))
+			} else {
+				state.TargetIssueSnapshots = rows
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{Key: "post_migrate_target_issue_snapshot", Label: "Target issue snapshot", Path: path, Count: len(rows)})
+				findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_issue_snapshot_reused", fmt.Sprintf("Reused target issue snapshot: %s", path)))
+			}
+			progressEnd(progress)
+		}
+		if path, ok := latestOutputFamilyPath(cfg.OutputDir, "issue-team-comparison.post-migration.csv"); ok {
+			progressStart(progress, "Loading issue team comparison")
+			rows, err := loadPostMigrationIssueComparisonRowsFromExport(path)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_comparison_reuse_failed", fmt.Sprintf("Could not reuse issue comparison %s: %v", path, err)))
+			} else {
+				state.IssueComparisons = rows
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{Key: "post_migrate_issue_comparison", Label: "Post-migration issue comparison", Path: path, Count: len(rows)})
+				findings = append(findings, newFinding(SeverityInfo, "post_migrate_issue_comparison_reused", fmt.Sprintf("Reused issue comparison: %s", path)))
+			}
+			progressEnd(progress)
+		}
+	}
+
+	if cfg.ParentLinkInScope {
+		if path, ok := latestOutputFamilyPath(cfg.OutputDir, "target-parent-link-issues.snapshot.post-migration.csv"); ok {
+			progressStart(progress, "Loading target Parent Link snapshot")
+			rows, err := loadTargetParentLinkSnapshotRowsFromExport(path)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_snapshot_reuse_failed", fmt.Sprintf("Could not reuse target Parent Link snapshot %s: %v", path, err)))
+			} else {
+				state.TargetParentLinkSnapshots = rows
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{Key: "post_migrate_target_parent_link_snapshot", Label: "Target Parent Link snapshot", Path: path, Count: len(rows)})
+				findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_parent_link_snapshot_reused", fmt.Sprintf("Reused target Parent Link snapshot: %s", path)))
+			}
+			progressEnd(progress)
+		}
+		if path, ok := latestOutputFamilyPath(cfg.OutputDir, "parent-link-comparison.post-migration.csv"); ok {
+			progressStart(progress, "Loading Parent Link comparison")
+			rows, err := loadPostMigrationParentLinkComparisonRowsFromExport(path)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_comparison_reuse_failed", fmt.Sprintf("Could not reuse Parent Link comparison %s: %v", path, err)))
+			} else {
+				state.ParentLinkComparisons = rows
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{Key: "post_migrate_parent_link_comparison", Label: "Post-migration parent-link comparison", Path: path, Count: len(rows)})
+				findings = append(findings, newFinding(SeverityInfo, "post_migrate_parent_link_comparison_reused", fmt.Sprintf("Reused Parent Link comparison: %s", path)))
+			}
+			progressEnd(progress)
+		}
+	}
+
+	if cfg.FilterTeamIDsInScope {
+		if path, ok := latestOutputFamilyPath(cfg.OutputDir, "target-filters.snapshot.post-migration.csv"); ok {
+			progressStart(progress, "Loading target filter snapshot")
+			rows, err := loadTargetFilterSnapshotRowsFromExport(path)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_snapshot_reuse_failed", fmt.Sprintf("Could not reuse target filter snapshot %s: %v", path, err)))
+			} else {
+				state.TargetFilterSnapshots = rows
+				state.TargetFilters = jiraFiltersFromTargetFilterSnapshots(rows)
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{Key: "post_migrate_target_filter_snapshot", Label: "Target filter snapshot", Path: path, Count: len(rows)})
+				findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_filter_snapshot_reused", fmt.Sprintf("Reused target filter snapshot: %s", path)))
+			}
+			progressEnd(progress)
+		}
+		if path, ok := latestOutputFamilyPath(cfg.OutputDir, "filter-target-match.post-migration.csv"); ok {
+			progressStart(progress, "Loading filter target match")
+			rows, err := loadPostMigrationFilterMatchRowsFromExport(path)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_target_match_reuse_failed", fmt.Sprintf("Could not reuse filter target match %s: %v", path, err)))
+			} else {
+				state.FilterTargetMatches = rows
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{Key: "post_migrate_filter_target_match", Label: "Post-migration filter target match", Path: path, Count: len(rows)})
+				findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_target_match_reused", fmt.Sprintf("Reused filter target match: %s", path)))
+			}
+			progressEnd(progress)
+		}
+		if path, ok := latestOutputFamilyPath(cfg.OutputDir, "filter-jql-comparison.post-migration.csv"); ok {
+			progressStart(progress, "Loading filter JQL comparison")
+			rows, err := loadPostMigrationFilterComparisonRowsFromExport(path)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_comparison_reuse_failed", fmt.Sprintf("Could not reuse filter JQL comparison %s: %v", path, err)))
+			} else {
+				state.FilterComparisons = rows
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{Key: "post_migrate_filter_comparison", Label: "Post-migration filter JQL comparison", Path: path, Count: len(rows)})
+				findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_comparison_reused", fmt.Sprintf("Reused filter JQL comparison: %s", path)))
+			}
+			progressEnd(progress)
+		}
+	}
+
+	return state, findings
+}
+
+func jiraFiltersFromTargetFilterSnapshots(rows []TargetFilterSnapshotRow) []JiraFilter {
+	filters := make([]JiraFilter, 0, len(rows))
+	for _, row := range rows {
+		filter := JiraFilter{
+			ID:          row.TargetFilterID,
+			Name:        row.TargetFilterName,
+			Description: row.Description,
+			JQL:         row.JQL,
+			ViewURL:     row.ViewURL,
+			SearchURL:   row.SearchURL,
+		}
+		if strings.TrimSpace(row.TargetOwner) != "" {
+			filter.Owner = &JiraFilterUser{DisplayName: row.TargetOwner, Name: row.TargetOwner, Key: row.TargetOwner}
+		}
+		filters = append(filters, filter)
+	}
+	return filters
 }
 
 func validatePostMigratePhaseState(state migrationState) []Finding {
@@ -2421,7 +2545,7 @@ func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrat
 
 	if cfg.FilterTeamIDsInScope {
 		filterTask := progress.BeginTask("Applying filter rewrites")
-		filterActions, filterFindings, filterResults := applyPostMigrationFilterCorrections(client, state, filterTask)
+		filterActions, filterFindings, filterResults := applyPostMigrationFilterCorrections(cfg, client, state, filterTask)
 		actions = append(actions, filterActions...)
 		findings = append(findings, filterFindings...)
 		state.FilterUpdateResults = filterResults
@@ -2504,17 +2628,6 @@ func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *m
 			continue
 		}
 
-		targetIssue, err := client.GetIssue(comparison.IssueKey, []string{comparison.TargetTeamsFieldID})
-		if err != nil {
-			result.Status = "fetch_failed"
-			result.Message = fmt.Sprintf("Could not load current target issue state: %v", err)
-			results = append(results, result)
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_fetch_failed", fmt.Sprintf("Could not fetch target issue %s before applying corrections: %v", comparison.IssueKey, err)))
-			continue
-		}
-		raw := targetIssue.Fields[comparison.TargetTeamsFieldID]
-		currentIDs := extractTeamFieldIDs(raw)
-		result.CurrentTargetTeamIDs = strings.Join(currentIDs, ",")
 		sourceIDs := splitDelimitedValues(comparison.SourceTeamIDs)
 		targetIDs := make([]string, 0, len(sourceIDs))
 		replacements := map[string]string{}
@@ -2545,6 +2658,39 @@ func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *m
 			results = append(results, result)
 			continue
 		}
+
+		if cfg.SkipPostMigrateDriftChecks {
+			if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: issueTeamFieldValueFromIDs(targetIDs)}); err != nil {
+				result.Status = "update_failed"
+				result.Message = fmt.Sprintf("Could not update target issue from prepared comparison: %v", err)
+				results = append(results, result)
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_update_failed", fmt.Sprintf("Could not update issue %s from prepared comparison: %v", comparison.IssueKey, err)))
+				continue
+			}
+			result.Status = "updated"
+			result.Message = "Updated target issue from prepared comparison without rechecking current target state"
+			result.CurrentTargetTeamIDs = strings.Join(targetIDs, ",")
+			results = append(results, result)
+			actions = append(actions, Action{
+				Kind:     "post_migrate_issue_update",
+				SourceID: comparison.IssueKey,
+				Status:   "updated",
+				Details:  fmt.Sprintf("teams field %s -> %s", comparison.SourceTeamsFieldID, comparison.TargetTeamsFieldID),
+			})
+			continue
+		}
+
+		targetIssue, err := client.GetIssue(comparison.IssueKey, []string{comparison.TargetTeamsFieldID})
+		if err != nil {
+			result.Status = "fetch_failed"
+			result.Message = fmt.Sprintf("Could not load current target issue state: %v", err)
+			results = append(results, result)
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_fetch_failed", fmt.Sprintf("Could not fetch target issue %s before applying corrections: %v", comparison.IssueKey, err)))
+			continue
+		}
+		raw := targetIssue.Fields[comparison.TargetTeamsFieldID]
+		currentIDs := extractTeamFieldIDs(raw)
+		result.CurrentTargetTeamIDs = strings.Join(currentIDs, ",")
 
 		currentSet := toSet(currentIDs)
 		targetSet := toSet(targetIDs)
@@ -2660,6 +2806,31 @@ func applyPostMigrationParentLinkCorrections(cfg Config, client *jiraClient, sta
 			continue
 		}
 
+		if cfg.SkipPostMigrateDriftChecks {
+			if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{
+				comparison.TargetParentLinkFieldID: comparison.TargetParentIssueKey,
+			}); err != nil {
+				result.Status = "update_failed"
+				result.Message = fmt.Sprintf("Could not update target issue Parent Link from prepared comparison: %v", err)
+				results = append(results, result)
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_update_failed", fmt.Sprintf("Could not update Parent Link on issue %s from prepared comparison: %v", comparison.IssueKey, err)))
+				continue
+			}
+			result.Status = "updated"
+			result.Message = "Updated target issue Parent Link from prepared comparison without rechecking current target state"
+			result.CurrentParentIssueID = comparison.TargetParentIssueID
+			result.CurrentParentIssueKey = comparison.TargetParentIssueKey
+			results = append(results, result)
+			actions = append(actions, Action{
+				Kind:     "post_migrate_parent_link_update",
+				SourceID: comparison.IssueKey,
+				TargetID: comparison.TargetParentIssueID,
+				Status:   "updated",
+				Details:  fmt.Sprintf("%s -> %s", comparison.SourceParentIssueKey, comparison.TargetParentIssueKey),
+			})
+			continue
+		}
+
 		targetChild, err := client.GetIssue(comparison.IssueKey, []string{comparison.TargetParentLinkFieldID})
 		if err != nil {
 			result.Status = "fetch_failed"
@@ -2727,7 +2898,7 @@ type postMigrationFilterRewritePlan struct {
 	Message            string
 }
 
-func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationFilterResultRow) {
+func applyPostMigrationFilterCorrections(cfg Config, client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationFilterResultRow) {
 	if len(state.FilterComparisons) == 0 {
 		progress.Done()
 		return nil, nil, nil
@@ -2761,6 +2932,40 @@ func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationSta
 
 		if plan.Status != "ready" {
 			results = append(results, result)
+			continue
+		}
+
+		if cfg.SkipPostMigrateDriftChecks {
+			filter := filterByID[plan.TargetFilterID]
+			name := nonEmptyString(filter.Name, plan.TargetFilterName)
+			updated, err := client.UpdateFilter(plan.TargetFilterID, JiraFilterUpdatePayload{
+				Name:        name,
+				Description: filter.Description,
+				JQL:         plan.RewrittenTargetJQL,
+			})
+			if err != nil {
+				result.Status = "update_failed"
+				result.Message = fmt.Sprintf("Could not update target filter from prepared comparison: %v", err)
+				results = append(results, result)
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_update_failed", fmt.Sprintf("Could not update filter %s from prepared comparison: %v", plan.TargetFilterID, err)))
+				continue
+			}
+			result.Status = "updated"
+			result.Message = "Updated target filter from prepared comparison without rechecking current target state"
+			result.TargetJQLBefore = plan.CurrentTargetJQL
+			if updated != nil && strings.TrimSpace(updated.JQL) != "" {
+				result.TargetJQLAfter = updated.JQL
+			} else {
+				result.TargetJQLAfter = plan.RewrittenTargetJQL
+			}
+			results = append(results, result)
+			actions = append(actions, Action{
+				Kind:     "post_migrate_filter_update",
+				SourceID: plan.SourceFilterID,
+				TargetID: plan.TargetFilterID,
+				Status:   "updated",
+				Details:  plan.TargetFilterName,
+			})
 			continue
 		}
 

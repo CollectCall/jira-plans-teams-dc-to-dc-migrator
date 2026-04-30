@@ -72,6 +72,8 @@ type Config struct {
 	Strict                      bool
 	DryRun                      bool
 	Apply                       bool
+	SkipPostMigrateDriftChecks  bool
+	PostMigrateDriftCheckSet    bool
 	NoInput                     bool
 	ConfigPath                  string
 	Profile                     string
@@ -123,6 +125,7 @@ func parseConfig(args []string) (Config, error) {
 	reportFormatFlagProvided := stringFlagProvided(remaining, "--format")
 	profileExplicit := envIsSet(envProfile) || stringFlagProvided(remaining, "--profile")
 	issueProjectScopeExplicit := envIsSet(envIssueProjectScope) || stringFlagProvided(remaining, "--issue-project-scope")
+	postMigrateDriftCheckSet := stringFlagProvided(remaining, "--skip-post-migrate-drift-checks")
 	fs.StringVar(&reportFormat, "format", reportFormat, "Report format: json or csv")
 
 	cfg.Strict = boolEnv(envStrict, false)
@@ -130,6 +133,7 @@ func parseConfig(args []string) (Config, error) {
 	fs.BoolVar(&cfg.Strict, "strict", cfg.Strict, "Exit non-zero when warnings or errors are present")
 	fs.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "Preview planned changes without sending writes")
 	fs.BoolVar(&cfg.Apply, "apply", false, "Execute writes for migrate")
+	fs.BoolVar(&cfg.SkipPostMigrateDriftChecks, "skip-post-migrate-drift-checks", false, "Trust prepared post-migration comparison artifacts and skip per-row target rechecks before updates")
 	fs.BoolVar(&cfg.NoInput, "no-input", false, "Disable interactive prompts and require flags or environment variables")
 	cfg.PhaseExplicit = envIsSet(envPhase) || stringFlagProvided(remaining, "--phase")
 
@@ -168,6 +172,7 @@ func parseConfig(args []string) (Config, error) {
 	}
 	cfg.ProfileExplicit = profileExplicit
 	cfg.IssueProjectScopeExplicit = issueProjectScopeExplicit
+	cfg.PostMigrateDriftCheckSet = postMigrateDriftCheckSet
 
 	if cfg.Command != "init" && cfg.Command != "config show" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" {
 		store, err := loadProfileStore(cfg.ConfigPath)

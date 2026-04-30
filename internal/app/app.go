@@ -193,12 +193,19 @@ func runInteractiveMigrateSession(cfg Config) int {
 			if !proceed {
 				return exitCodeFor(report)
 			}
+			skipDriftChecks, err := promptPostMigrateDriftCheckMode()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				return ExitFailure
+			}
+			cfg.SkipPostMigrateDriftChecks = skipDriftChecks
+			cfg.PostMigrateDriftCheckSet = true
 			cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
 			}
-			if err := showPreparedPostMigrationFilesFromCurrentOutputs(cfg); err != nil {
+			if _, err := showPreparedPostMigrationFilesFromCurrentOutputs(cfg); err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
 			}
@@ -318,6 +325,14 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 	cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir)
 	if err != nil {
 		return Report{}, false, err
+	}
+	if normalizeMigrationPhase(phase) == phasePostMigrate && !cfg.PostMigrateDriftCheckSet {
+		skipDriftChecks, err := promptPostMigrateDriftCheckMode()
+		if err != nil {
+			return Report{}, false, err
+		}
+		cfg.SkipPostMigrateDriftChecks = skipDriftChecks
+		cfg.PostMigrateDriftCheckSet = true
 	}
 	stamp := interactivePhaseOutputTimestamp(phase)
 
@@ -453,22 +468,22 @@ func artifactPathFromSummaryLine(line string) string {
 	return line
 }
 
-func showPreparedPostMigrationFilesFromCurrentOutputs(cfg Config) error {
+func showPreparedPostMigrationFilesFromCurrentOutputs(cfg Config) (migrationState, error) {
 	postCfg := cfg
 	postCfg.Phase = phasePostMigrate
 	postCfg.DryRun = true
 	var err error
 	postCfg.OutputDir, err = cleanOutputDirPath(postCfg.OutputDir)
 	if err != nil {
-		return err
+		return migrationState{}, err
 	}
 
 	state, findings := loadMigrationState(postCfg)
 	if hasErrors(findings) {
-		return nil
+		return state, nil
 	}
 	_ = preparePostMigrationTargetArtifacts(postCfg, &state, nil)
-	return showPreparedPostMigrationFilesPreview(state)
+	return state, showPreparedPostMigrationFilesPreview(state)
 }
 
 func interactivePhaseOutputTimestamp(phase string) string {

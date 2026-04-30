@@ -401,12 +401,27 @@ func quoteJQLValues(values []string) string {
 }
 
 func (c *jiraClient) GetIssue(key string, fields []string) (*JiraIssue, error) {
+	return c.getIssue(key, fields, false)
+}
+
+func (c *jiraClient) GetIssueNoRetry429(key string, fields []string) (*JiraIssue, error) {
+	return c.getIssue(key, fields, true)
+}
+
+func (c *jiraClient) getIssue(key string, fields []string, noRetry bool) (*JiraIssue, error) {
 	query := url.Values{}
 	if len(fields) > 0 {
 		query.Set("fields", strings.Join(fields, ","))
 	}
 
-	body, err := c.doCoreJSON(http.MethodGet, "/rest/api/2/issue/"+strings.TrimSpace(key), query, nil)
+	endpoint := "/rest/api/2/issue/" + strings.TrimSpace(key)
+	var body []byte
+	var err error
+	if noRetry {
+		body, err = c.doCoreJSONNoRetry429(http.MethodGet, endpoint, query, nil)
+	} else {
+		body, err = c.doCoreJSON(http.MethodGet, endpoint, query, nil)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -419,9 +434,24 @@ func (c *jiraClient) GetIssue(key string, fields []string) (*JiraIssue, error) {
 }
 
 func (c *jiraClient) UpdateIssueFields(key string, fields map[string]any) error {
-	_, err := c.doCoreJSON(http.MethodPut, "/rest/api/2/issue/"+strings.TrimSpace(key), nil, map[string]any{
+	return c.updateIssueFields(key, fields, false)
+}
+
+func (c *jiraClient) UpdateIssueFieldsNoRetry429(key string, fields map[string]any) error {
+	return c.updateIssueFields(key, fields, true)
+}
+
+func (c *jiraClient) updateIssueFields(key string, fields map[string]any, noRetry bool) error {
+	endpoint := "/rest/api/2/issue/" + strings.TrimSpace(key)
+	payload := map[string]any{
 		"fields": fields,
-	})
+	}
+	var err error
+	if noRetry {
+		_, err = c.doCoreJSONNoRetry429(http.MethodPut, endpoint, nil, payload)
+	} else {
+		_, err = c.doCoreJSON(http.MethodPut, endpoint, nil, payload)
+	}
 	return err
 }
 
@@ -636,6 +666,14 @@ func (c *jiraClient) doCoreJSON(method, endpoint string, query url.Values, paylo
 	return c.doJSONAgainstBase(c.instanceBaseURL, method, endpoint, query, payload)
 }
 
+func (c *jiraClient) doCoreJSONNoRetry429(method, endpoint string, query url.Values, payload any) ([]byte, error) {
+	resp, err := c.doJSONAgainstBaseResponseWithRetryPolicy(c.instanceBaseURL, method, endpoint, query, payload, jiraMaxRetryAttempts, false)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
 func (c *jiraClient) doCoreJSONResponse(method, endpoint string, query url.Values, payload any) (jiraHTTPResponse, error) {
 	return c.doJSONAgainstBaseResponse(c.instanceBaseURL, method, endpoint, query, payload)
 }
@@ -657,6 +695,13 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 }
 
 func (c *jiraClient) doJSONAgainstBaseResponse(base, method, endpoint string, query url.Values, payload any) (jiraHTTPResponse, error) {
+	return c.doJSONAgainstBaseResponseWithRetryPolicy(base, method, endpoint, query, payload, jiraMaxRetryAttempts, true)
+}
+
+func (c *jiraClient) doJSONAgainstBaseResponseWithRetryPolicy(base, method, endpoint string, query url.Values, payload any, maxAttempts int, retryTooManyRequests bool) (jiraHTTPResponse, error) {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
 	u, err := url.Parse(base)
 	if err != nil {
 		return jiraHTTPResponse{}, fmt.Errorf("invalid base URL: %w", err)
@@ -677,7 +722,7 @@ func (c *jiraClient) doJSONAgainstBaseResponse(base, method, endpoint string, qu
 	}
 
 	var lastErr error
-	for attempt := 1; attempt <= jiraMaxRetryAttempts; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		var body io.Reader
 		if payloadBytes != nil {
 			body = bytes.NewReader(payloadBytes)
@@ -699,7 +744,7 @@ func (c *jiraClient) doJSONAgainstBaseResponse(base, method, endpoint string, qu
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			lastErr = err
-			if attempt < jiraMaxRetryAttempts && method != http.MethodPost {
+			if attempt < maxAttempts && method != http.MethodPost {
 				time.Sleep(retryDelay(attempt, 0))
 				continue
 			}
@@ -740,7 +785,7 @@ func (c *jiraClient) doJSONAgainstBaseResponse(base, method, endpoint string, qu
 		}
 		lastErr = apiErr
 
-		if attempt < jiraMaxRetryAttempts && shouldRetryJiraRequest(method, resp.StatusCode) {
+		if attempt < maxAttempts && shouldRetryJiraRequestWithPolicy(method, resp.StatusCode, retryTooManyRequests) {
 			time.Sleep(retryDelay(attempt, retryAfterDelay(resp.Header.Get("Retry-After"))))
 			continue
 		}
@@ -781,11 +826,17 @@ func validatedJiraRequestURL(u url.URL) (*url.URL, error) {
 }
 
 func shouldRetryJiraRequest(method string, statusCode int) bool {
+	return shouldRetryJiraRequestWithPolicy(method, statusCode, true)
+}
+
+func shouldRetryJiraRequestWithPolicy(method string, statusCode int, retryTooManyRequests bool) bool {
 	if method == http.MethodPost {
 		return false
 	}
 	switch statusCode {
-	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusTooManyRequests:
+		return retryTooManyRequests
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
 	default:
 		return false

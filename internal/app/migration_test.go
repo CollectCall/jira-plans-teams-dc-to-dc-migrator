@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -3170,6 +3171,316 @@ func TestApplyPostMigrationIssueCorrectionsCanSkipDriftCheck(t *testing.T) {
 	if !strings.Contains(updateBody, `"customfield_16604":"8"`) {
 		t.Fatalf("expected prepared team field update payload, got %s", updateBody)
 	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsUsesWorkersWhenSkippingDriftChecks(t *testing.T) {
+	state := postMigrationIssueWorkerTestState(10)
+	var mu sync.Mutex
+	activePUTs := 0
+	maxActivePUTs := 0
+	putRequests := 0
+	getRequests := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			mu.Lock()
+			getRequests++
+			mu.Unlock()
+			t.Fatalf("did not expect drift-check GET when skip-post-migrate-drift-checks is enabled")
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			mu.Lock()
+			putRequests++
+			activePUTs++
+			if activePUTs > maxActivePUTs {
+				maxActivePUTs = activePUTs
+			}
+			mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
+			mu.Lock()
+			activePUTs--
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(Config{SkipPostMigrateDriftChecks: true}, client, &state, &progressTask{})
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+	if len(results) != 10 {
+		t.Fatalf("expected 10 results, got %d", len(results))
+	}
+	for i, result := range results {
+		if result.IssueKey != fmt.Sprintf("TP-%d", i+1) || result.Status != "updated" {
+			t.Fatalf("unexpected result at %d: %#v", i, result)
+		}
+	}
+	if getRequests != 0 {
+		t.Fatalf("expected no GET requests, got %d", getRequests)
+	}
+	if putRequests != 10 {
+		t.Fatalf("expected 10 PUT requests, got %d", putRequests)
+	}
+	if maxActivePUTs < 2 {
+		t.Fatalf("expected concurrent PUT requests, max active was %d", maxActivePUTs)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsUsesWorkersWithDriftChecks(t *testing.T) {
+	state := postMigrationIssueWorkerTestState(10)
+	var mu sync.Mutex
+	activePUTs := 0
+	maxActivePUTs := 0
+	putRequests := 0
+	getRequests := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			mu.Lock()
+			getRequests++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"fields":{"customfield_16604":4}}`))
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			mu.Lock()
+			putRequests++
+			activePUTs++
+			if activePUTs > maxActivePUTs {
+				maxActivePUTs = activePUTs
+			}
+			mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
+			mu.Lock()
+			activePUTs--
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(Config{}, client, &state, &progressTask{})
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings: %#v", findings)
+	}
+	if len(results) != 10 {
+		t.Fatalf("expected 10 results, got %d", len(results))
+	}
+	for i, result := range results {
+		if result.IssueKey != fmt.Sprintf("TP-%d", i+1) || result.Status != "updated" {
+			t.Fatalf("unexpected result at %d: %#v", i, result)
+		}
+	}
+	if getRequests != 10 {
+		t.Fatalf("expected 10 GET requests, got %d", getRequests)
+	}
+	if putRequests != 10 {
+		t.Fatalf("expected 10 PUT requests, got %d", putRequests)
+	}
+	if maxActivePUTs < 2 {
+		t.Fatalf("expected concurrent PUT requests, max active was %d", maxActivePUTs)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsRetriesOnlyTooManyRequestsWithFallbackWorkers(t *testing.T) {
+	state := postMigrationIssueWorkerTestState(6)
+	var mu sync.Mutex
+	putRequestsByIssue := map[string]int{}
+	activePUTs := 0
+	maxActivePUTs := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			issueKey := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			mu.Lock()
+			putRequestsByIssue[issueKey]++
+			attempt := putRequestsByIssue[issueKey]
+			activePUTs++
+			if activePUTs > maxActivePUTs {
+				maxActivePUTs = activePUTs
+			}
+			mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
+			mu.Lock()
+			activePUTs--
+			mu.Unlock()
+			if (issueKey == "TP-2" || issueKey == "TP-5") && attempt == 1 {
+				http.Error(w, "too many requests", http.StatusTooManyRequests)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(Config{SkipPostMigrateDriftChecks: true}, client, &state, &progressTask{})
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings after successful fallback retry: %#v", findings)
+	}
+	for i, result := range results {
+		expectedIssue := fmt.Sprintf("TP-%d", i+1)
+		if result.IssueKey != expectedIssue || result.Status != "updated" {
+			t.Fatalf("unexpected result at %d: %#v", i, result)
+		}
+	}
+	for i := 1; i <= 6; i++ {
+		issueKey := fmt.Sprintf("TP-%d", i)
+		want := 1
+		if issueKey == "TP-2" || issueKey == "TP-5" {
+			want = 2
+			if !strings.Contains(results[i-1].Message, "reduced concurrency from 5 to 3") {
+				t.Fatalf("expected fallback retry message for %s, got %q", issueKey, results[i-1].Message)
+			}
+		}
+		if got := putRequestsByIssue[issueKey]; got != want {
+			t.Fatalf("expected %s to receive %d PUT request(s), got %d", issueKey, want, got)
+		}
+	}
+	if maxActivePUTs < 2 {
+		t.Fatalf("expected first pass to use concurrent PUT requests, max active was %d", maxActivePUTs)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsDoesNotRetryNonTooManyRequests(t *testing.T) {
+	state := postMigrationIssueWorkerTestState(3)
+	var mu sync.Mutex
+	putRequestsByIssue := map[string]int{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			issueKey := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			mu.Lock()
+			putRequestsByIssue[issueKey]++
+			mu.Unlock()
+			if issueKey == "TP-2" {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(Config{SkipPostMigrateDriftChecks: true}, client, &state, &progressTask{})
+	if len(findings) != 1 {
+		t.Fatalf("expected one non-retryable finding, got %#v", findings)
+	}
+	if results[1].IssueKey != "TP-2" || results[1].Status != "update_failed" {
+		t.Fatalf("expected TP-2 to fail without retry, got %#v", results[1])
+	}
+	for i := 1; i <= 3; i++ {
+		issueKey := fmt.Sprintf("TP-%d", i)
+		if got := putRequestsByIssue[issueKey]; got != 1 {
+			t.Fatalf("expected %s to receive one PUT request, got %d", issueKey, got)
+		}
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsKeepsBuiltInRetryForNonTooManyRequests(t *testing.T) {
+	state := postMigrationIssueWorkerTestState(2)
+	var mu sync.Mutex
+	putRequestsByIssue := map[string]int{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			issueKey := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			mu.Lock()
+			putRequestsByIssue[issueKey]++
+			attempt := putRequestsByIssue[issueKey]
+			mu.Unlock()
+			if issueKey == "TP-1" && attempt == 1 {
+				http.Error(w, "bad gateway", http.StatusBadGateway)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(Config{SkipPostMigrateDriftChecks: true}, client, &state, &progressTask{})
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings after built-in retry success: %#v", findings)
+	}
+	for i, result := range results {
+		if result.IssueKey != fmt.Sprintf("TP-%d", i+1) || result.Status != "updated" {
+			t.Fatalf("unexpected result at %d: %#v", i, result)
+		}
+	}
+	if got := putRequestsByIssue["TP-1"]; got != 2 {
+		t.Fatalf("expected TP-1 to use built-in retry after 502, got %d PUT requests", got)
+	}
+	if got := putRequestsByIssue["TP-2"]; got != 1 {
+		t.Fatalf("expected TP-2 to receive one PUT request, got %d", got)
+	}
+	if strings.Contains(results[0].Message, "reduced concurrency") {
+		t.Fatalf("did not expect fallback message after built-in 502 retry, got %q", results[0].Message)
+	}
+}
+
+func postMigrationIssueWorkerTestState(count int) migrationState {
+	state := migrationState{
+		TeamMappings: []TeamMapping{{SourceTeamID: 4, TargetTeamID: "8", Decision: "merge"}},
+	}
+	for i := 1; i <= count; i++ {
+		issueKey := fmt.Sprintf("TP-%d", i)
+		state.IssueTeamRows = append(state.IssueTeamRows, IssueTeamRow{
+			IssueKey:      issueKey,
+			ProjectKey:    "TP",
+			SourceTeamIDs: "4",
+			TeamsFieldID:  "customfield_16604",
+		})
+		state.IssueComparisons = append(state.IssueComparisons, PostMigrationIssueComparisonRow{
+			IssueKey:             issueKey,
+			ProjectKey:           "TP",
+			SourceTeamsFieldID:   "customfield_16604",
+			TargetTeamsFieldID:   "customfield_16604",
+			SourceTeamIDs:        "4",
+			TargetTeamIDs:        "8",
+			CurrentTargetTeamIDs: "4",
+			Status:               "ready",
+		})
+	}
+	return state
 }
 
 func TestApplyPostMigrationIssueCorrectionsSendsSingleObjectTeamFieldAsString(t *testing.T) {

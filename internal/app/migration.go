@@ -16,6 +16,11 @@ import (
 	"sync"
 )
 
+const (
+	postMigrationIssueApplyWorkers         = 5
+	postMigrationIssueApplyFallbackWorkers = 3
+)
+
 type migrationState struct {
 	IdentityMappings          IdentityMapping
 	SourcePrograms            []ProgramDTO
@@ -2878,176 +2883,276 @@ func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *m
 
 	targetTeamIDs := teamTargetIDsBySourceID(state.TeamMappings)
 	sourceIssueKeys := issueTeamSourceIssueKeySet(state.IssueTeamRows)
-	results := make([]PostMigrationIssueResultRow, 0, len(state.IssueComparisons))
+	rowResults := applyPostMigrationIssueCorrectionsWithFallback(cfg, client, state.IssueComparisons, targetTeamIDs, sourceIssueKeys, progress)
+	results := make([]PostMigrationIssueResultRow, 0, len(rowResults))
 	actions := make([]Action, 0)
 	findings := make([]Finding, 0)
-
-	for i, comparison := range state.IssueComparisons {
-		progress.Update(i+1, len(state.IssueComparisons))
-		progress.Detail(fmt.Sprintf("preparing %s", comparison.IssueKey))
-		result := PostMigrationIssueResultRow{
-			IssueKey:           comparison.IssueKey,
-			SourceTeamsFieldID: comparison.SourceTeamsFieldID,
-			TargetTeamsFieldID: comparison.TargetTeamsFieldID,
-			SourceTeamIDs:      comparison.SourceTeamIDs,
-			TargetTeamIDs:      comparison.TargetTeamIDs,
-			Status:             comparison.Status,
-			Message:            comparison.Reason,
-		}
-
-		if comparison.Status != "ready" {
-			results = append(results, result)
-			continue
-		}
-		if len(sourceIssueKeys) == 0 {
-			result.Status = "source_export_missing"
-			result.Message = "No source issue/team export rows are available for this issue correction"
-			results = append(results, result)
-			continue
-		}
-		if _, ok := sourceIssueKeys[strings.TrimSpace(comparison.IssueKey)]; !ok {
-			result.Status = "not_in_source_export"
-			result.Message = "This issue was not present in the source issue/team export"
-			results = append(results, result)
-			continue
-		}
-		if !issueProjectInScope(cfg.IssueProjectScope, comparison.ProjectKey) {
-			result.Status = "out_of_scope_project"
-			result.Message = "This issue project is outside the configured issue project scope"
-			results = append(results, result)
-			continue
-		}
-
-		sourceIDs := splitDelimitedValues(comparison.SourceTeamIDs)
-		targetIDs := make([]string, 0, len(sourceIDs))
-		replacements := map[string]string{}
-		changedSourceIDs := make([]string, 0, len(sourceIDs))
-		unresolved := false
-		for _, sourceID := range sourceIDs {
-			targetID := strings.TrimSpace(targetTeamIDs[sourceID])
-			if targetID == "" {
-				unresolved = true
-				break
-			}
-			targetIDs = append(targetIDs, targetID)
-			replacements[sourceID] = targetID
-			if targetID != sourceID {
-				changedSourceIDs = append(changedSourceIDs, sourceID)
-			}
-		}
-		if unresolved {
-			result.Status = "unresolved_team_mapping"
-			result.Message = "No destination team ID was resolved for one or more source team IDs on this issue"
-			results = append(results, result)
-			continue
-		}
-
-		if len(changedSourceIDs) == 0 {
-			result.Status = "same_id"
-			result.Message = "Source and target team IDs are identical; no issue update is needed"
-			results = append(results, result)
-			continue
-		}
-
-		if cfg.SkipPostMigrateDriftChecks {
-			progress.Detail(fmt.Sprintf("updating %s from prepared comparison", comparison.IssueKey))
-			if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: issueTeamFieldValueFromIDs(targetIDs)}); err != nil {
-				result.Status = "update_failed"
-				result.Message = fmt.Sprintf("Could not update target issue from prepared comparison: %v", err)
-				results = append(results, result)
-				findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_update_failed", fmt.Sprintf("Could not update issue %s from prepared comparison: %v", comparison.IssueKey, err)))
-				continue
-			}
-			result.Status = "updated"
-			result.Message = "Updated target issue from prepared comparison without rechecking current target state"
-			result.CurrentTargetTeamIDs = strings.Join(targetIDs, ",")
-			results = append(results, result)
-			actions = append(actions, Action{
-				Kind:     "post_migrate_issue_update",
-				SourceID: comparison.IssueKey,
-				Status:   "updated",
-				Details:  fmt.Sprintf("teams field %s -> %s", comparison.SourceTeamsFieldID, comparison.TargetTeamsFieldID),
-			})
-			continue
-		}
-
-		progress.Detail(fmt.Sprintf("checking %s", comparison.IssueKey))
-		targetIssue, err := client.GetIssue(comparison.IssueKey, []string{comparison.TargetTeamsFieldID})
-		if err != nil {
-			result.Status = "fetch_failed"
-			result.Message = fmt.Sprintf("Could not load current target issue state: %v", err)
-			results = append(results, result)
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_fetch_failed", fmt.Sprintf("Could not fetch target issue %s before applying corrections: %v", comparison.IssueKey, err)))
-			continue
-		}
-		raw := targetIssue.Fields[comparison.TargetTeamsFieldID]
-		currentIDs := extractTeamFieldIDs(raw)
-		result.CurrentTargetTeamIDs = strings.Join(currentIDs, ",")
-
-		currentSet := toSet(currentIDs)
-		targetSet := toSet(targetIDs)
-		if setEquals(currentSet, targetSet) {
-			result.Status = "already_rewritten"
-			result.Message = "The target issue already contains the mapped destination team IDs"
-			results = append(results, result)
-			continue
-		}
-
-		if len(currentIDs) > 0 {
-			missingSource := false
-			for _, sourceID := range changedSourceIDs {
-				if _, ok := currentSet[sourceID]; !ok {
-					missingSource = true
-					break
-				}
-			}
-			if missingSource {
-				result.Status = "source_team_ids_not_found_in_target_issue"
-				result.Message = "The current target issue Teams field does not contain all source team IDs that need rewriting"
-				results = append(results, result)
-				continue
-			}
-		}
-
-		var updateValue any
-		if len(currentIDs) == 0 {
-			updateValue = issueTeamFieldValueFromIDs(targetIDs)
-		} else {
-			rewrittenRaw, changed := rewriteTeamFieldIDs(raw, replacements)
-			if !changed || reflect.DeepEqual(rewrittenRaw, raw) {
-				result.Status = "no_change"
-				result.Message = "Rewriting the target issue Teams field produced no change"
-				results = append(results, result)
-				continue
-			}
-			updateValue = issueTeamFieldUpdateValue(raw, rewrittenRaw)
-		}
-
-		progress.Detail(fmt.Sprintf("updating %s", comparison.IssueKey))
-		if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: updateValue}); err != nil {
-			result.Status = "update_failed"
-			result.Message = fmt.Sprintf("Could not update target issue: %v", err)
-			results = append(results, result)
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_update_failed", fmt.Sprintf("Could not update issue %s: %v", comparison.IssueKey, err)))
-			continue
-		}
-
-		result.Status = "updated"
-		result.Message = "Updated target issue Teams field to the mapped destination team IDs"
-		result.CurrentTargetTeamIDs = strings.Join(targetIDs, ",")
-		results = append(results, result)
-		actions = append(actions, Action{
-			Kind:     "post_migrate_issue_update",
-			SourceID: comparison.IssueKey,
-			Status:   "updated",
-			Details:  fmt.Sprintf("teams field %s -> %s", comparison.SourceTeamsFieldID, comparison.TargetTeamsFieldID),
-		})
+	for _, rowResult := range rowResults {
+		results = append(results, rowResult.result)
+		actions = append(actions, rowResult.actions...)
+		findings = append(findings, rowResult.findings...)
 	}
 
 	updated := countIssueResultStatus(results, "updated")
 	progress.Detail(fmt.Sprintf("%d processed, %d updated, %d skipped", len(results), updated, len(results)-updated))
 	progress.Done()
 	return actions, findings, results
+}
+
+type postMigrationIssueApplyResult struct {
+	result   PostMigrationIssueResultRow
+	actions  []Action
+	findings []Finding
+	retry429 bool
+}
+
+func applyPostMigrationIssueCorrectionsWithFallback(cfg Config, client *jiraClient, comparisons []PostMigrationIssueComparisonRow, targetTeamIDs map[string]string, sourceIssueKeys map[string]struct{}, progress *progressTask) []postMigrationIssueApplyResult {
+	allIndexes := make([]int, len(comparisons))
+	for index := range comparisons {
+		allIndexes[index] = index
+	}
+	results := applyPostMigrationIssueCorrectionsConcurrent(cfg, client, comparisons, targetTeamIDs, sourceIssueKeys, progress, allIndexes, postMigrationIssueApplyWorkers, true)
+
+	retryIndexes := make([]int, 0)
+	for index, rowResult := range results {
+		if rowResult.retry429 {
+			retryIndexes = append(retryIndexes, index)
+		}
+	}
+	if len(retryIndexes) == 0 {
+		return results
+	}
+
+	progress.Detail(fmt.Sprintf("retrying %d issue updates with %d workers after Jira 429 responses", len(retryIndexes), postMigrationIssueApplyFallbackWorkers))
+	retryResults := applyPostMigrationIssueCorrectionsConcurrent(cfg, client, comparisons, targetTeamIDs, sourceIssueKeys, progress, retryIndexes, postMigrationIssueApplyFallbackWorkers, false)
+	for _, index := range retryIndexes {
+		if retryResults[index].result.Status == "updated" {
+			retryResults[index].result.Message = postMigrationIssueRetrySuccessMessage(cfg)
+		} else if retryResults[index].result.Message != "" {
+			retryResults[index].result.Message = fmt.Sprintf("%s; retried after reducing issue apply concurrency from %d to %d", retryResults[index].result.Message, postMigrationIssueApplyWorkers, postMigrationIssueApplyFallbackWorkers)
+		}
+		results[index] = retryResults[index]
+	}
+	return results
+}
+
+func applyPostMigrationIssueCorrectionsConcurrent(cfg Config, client *jiraClient, comparisons []PostMigrationIssueComparisonRow, targetTeamIDs map[string]string, sourceIssueKeys map[string]struct{}, progress *progressTask, indexes []int, workerCount int, updateProgress bool) []postMigrationIssueApplyResult {
+	results := make([]postMigrationIssueApplyResult, len(comparisons))
+	if len(indexes) == 0 {
+		return results
+	}
+	if workerCount > len(indexes) {
+		workerCount = len(indexes)
+	}
+	if workerCount < 1 {
+		workerCount = 1
+	}
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var progressMu sync.Mutex
+	processed := 0
+
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				results[index] = applyPostMigrationIssueCorrection(cfg, client, comparisons[index], targetTeamIDs, sourceIssueKeys, progress)
+				if updateProgress {
+					progressMu.Lock()
+					processed++
+					progress.Update(processed, len(comparisons))
+					progressMu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, index := range indexes {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+	return results
+}
+
+func postMigrationIssueRetrySuccessMessage(cfg Config) string {
+	if cfg.SkipPostMigrateDriftChecks {
+		return fmt.Sprintf("Updated target issue from prepared comparison after retrying with reduced concurrency from %d to %d", postMigrationIssueApplyWorkers, postMigrationIssueApplyFallbackWorkers)
+	}
+	return fmt.Sprintf("Updated target issue Teams field after retrying with reduced concurrency from %d to %d", postMigrationIssueApplyWorkers, postMigrationIssueApplyFallbackWorkers)
+}
+
+func applyPostMigrationIssueCorrection(cfg Config, client *jiraClient, comparison PostMigrationIssueComparisonRow, targetTeamIDs map[string]string, sourceIssueKeys map[string]struct{}, progress *progressTask) postMigrationIssueApplyResult {
+	progress.Detail(fmt.Sprintf("preparing %s", comparison.IssueKey))
+	result := PostMigrationIssueResultRow{
+		IssueKey:           comparison.IssueKey,
+		SourceTeamsFieldID: comparison.SourceTeamsFieldID,
+		TargetTeamsFieldID: comparison.TargetTeamsFieldID,
+		SourceTeamIDs:      comparison.SourceTeamIDs,
+		TargetTeamIDs:      comparison.TargetTeamIDs,
+		Status:             comparison.Status,
+		Message:            comparison.Reason,
+	}
+
+	if comparison.Status != "ready" {
+		return postMigrationIssueApplyResult{result: result}
+	}
+	if len(sourceIssueKeys) == 0 {
+		result.Status = "source_export_missing"
+		result.Message = "No source issue/team export rows are available for this issue correction"
+		return postMigrationIssueApplyResult{result: result}
+	}
+	if _, ok := sourceIssueKeys[strings.TrimSpace(comparison.IssueKey)]; !ok {
+		result.Status = "not_in_source_export"
+		result.Message = "This issue was not present in the source issue/team export"
+		return postMigrationIssueApplyResult{result: result}
+	}
+	if !issueProjectInScope(cfg.IssueProjectScope, comparison.ProjectKey) {
+		result.Status = "out_of_scope_project"
+		result.Message = "This issue project is outside the configured issue project scope"
+		return postMigrationIssueApplyResult{result: result}
+	}
+
+	sourceIDs := splitDelimitedValues(comparison.SourceTeamIDs)
+	targetIDs := make([]string, 0, len(sourceIDs))
+	replacements := map[string]string{}
+	changedSourceIDs := make([]string, 0, len(sourceIDs))
+	unresolved := false
+	for _, sourceID := range sourceIDs {
+		targetID := strings.TrimSpace(targetTeamIDs[sourceID])
+		if targetID == "" {
+			unresolved = true
+			break
+		}
+		targetIDs = append(targetIDs, targetID)
+		replacements[sourceID] = targetID
+		if targetID != sourceID {
+			changedSourceIDs = append(changedSourceIDs, sourceID)
+		}
+	}
+	if unresolved {
+		result.Status = "unresolved_team_mapping"
+		result.Message = "No destination team ID was resolved for one or more source team IDs on this issue"
+		return postMigrationIssueApplyResult{result: result}
+	}
+
+	if len(changedSourceIDs) == 0 {
+		result.Status = "same_id"
+		result.Message = "Source and target team IDs are identical; no issue update is needed"
+		return postMigrationIssueApplyResult{result: result}
+	}
+
+	if cfg.SkipPostMigrateDriftChecks {
+		progress.Detail(fmt.Sprintf("updating %s from prepared comparison", comparison.IssueKey))
+		if err := client.UpdateIssueFieldsNoRetry429(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: issueTeamFieldValueFromIDs(targetIDs)}); err != nil {
+			result.Status = "update_failed"
+			result.Message = fmt.Sprintf("Could not update target issue from prepared comparison: %v", err)
+			return postMigrationIssueApplyResult{
+				result:   result,
+				retry429: isJiraTooManyRequestsError(err),
+				findings: []Finding{
+					newFinding(SeverityWarning, "post_migrate_issue_update_failed", fmt.Sprintf("Could not update issue %s from prepared comparison: %v", comparison.IssueKey, err)),
+				},
+			}
+		}
+		result.Status = "updated"
+		result.Message = "Updated target issue from prepared comparison without rechecking current target state"
+		result.CurrentTargetTeamIDs = strings.Join(targetIDs, ",")
+		return postMigrationIssueApplyResult{
+			result: result,
+			actions: []Action{{
+				Kind:     "post_migrate_issue_update",
+				SourceID: comparison.IssueKey,
+				Status:   "updated",
+				Details:  fmt.Sprintf("teams field %s -> %s", comparison.SourceTeamsFieldID, comparison.TargetTeamsFieldID),
+			}},
+		}
+	}
+
+	progress.Detail(fmt.Sprintf("checking %s", comparison.IssueKey))
+	targetIssue, err := client.GetIssueNoRetry429(comparison.IssueKey, []string{comparison.TargetTeamsFieldID})
+	if err != nil {
+		result.Status = "fetch_failed"
+		result.Message = fmt.Sprintf("Could not load current target issue state: %v", err)
+		return postMigrationIssueApplyResult{
+			result:   result,
+			retry429: isJiraTooManyRequestsError(err),
+			findings: []Finding{
+				newFinding(SeverityWarning, "post_migrate_issue_fetch_failed", fmt.Sprintf("Could not fetch target issue %s before applying corrections: %v", comparison.IssueKey, err)),
+			},
+		}
+	}
+	raw := targetIssue.Fields[comparison.TargetTeamsFieldID]
+	currentIDs := extractTeamFieldIDs(raw)
+	result.CurrentTargetTeamIDs = strings.Join(currentIDs, ",")
+
+	currentSet := toSet(currentIDs)
+	targetSet := toSet(targetIDs)
+	if setEquals(currentSet, targetSet) {
+		result.Status = "already_rewritten"
+		result.Message = "The target issue already contains the mapped destination team IDs"
+		return postMigrationIssueApplyResult{result: result}
+	}
+
+	if len(currentIDs) > 0 {
+		missingSource := false
+		for _, sourceID := range changedSourceIDs {
+			if _, ok := currentSet[sourceID]; !ok {
+				missingSource = true
+				break
+			}
+		}
+		if missingSource {
+			result.Status = "source_team_ids_not_found_in_target_issue"
+			result.Message = "The current target issue Teams field does not contain all source team IDs that need rewriting"
+			return postMigrationIssueApplyResult{result: result}
+		}
+	}
+
+	var updateValue any
+	if len(currentIDs) == 0 {
+		updateValue = issueTeamFieldValueFromIDs(targetIDs)
+	} else {
+		rewrittenRaw, changed := rewriteTeamFieldIDs(raw, replacements)
+		if !changed || reflect.DeepEqual(rewrittenRaw, raw) {
+			result.Status = "no_change"
+			result.Message = "Rewriting the target issue Teams field produced no change"
+			return postMigrationIssueApplyResult{result: result}
+		}
+		updateValue = issueTeamFieldUpdateValue(raw, rewrittenRaw)
+	}
+
+	progress.Detail(fmt.Sprintf("updating %s", comparison.IssueKey))
+	if err := client.UpdateIssueFieldsNoRetry429(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: updateValue}); err != nil {
+		result.Status = "update_failed"
+		result.Message = fmt.Sprintf("Could not update target issue: %v", err)
+		return postMigrationIssueApplyResult{
+			result:   result,
+			retry429: isJiraTooManyRequestsError(err),
+			findings: []Finding{
+				newFinding(SeverityWarning, "post_migrate_issue_update_failed", fmt.Sprintf("Could not update issue %s: %v", comparison.IssueKey, err)),
+			},
+		}
+	}
+
+	result.Status = "updated"
+	result.Message = "Updated target issue Teams field to the mapped destination team IDs"
+	result.CurrentTargetTeamIDs = strings.Join(targetIDs, ",")
+	return postMigrationIssueApplyResult{
+		result: result,
+		actions: []Action{{
+			Kind:     "post_migrate_issue_update",
+			SourceID: comparison.IssueKey,
+			Status:   "updated",
+			Details:  fmt.Sprintf("teams field %s -> %s", comparison.SourceTeamsFieldID, comparison.TargetTeamsFieldID),
+		}},
+	}
+}
+
+func isJiraTooManyRequestsError(err error) bool {
+	var apiErr *jiraAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests
 }
 
 func countIssueResultStatus(rows []PostMigrationIssueResultRow, status string) int {

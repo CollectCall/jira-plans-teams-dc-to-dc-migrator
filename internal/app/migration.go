@@ -306,7 +306,7 @@ func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState,
 
 	issueKeys := uniqueIssueKeysFromTeamRows(sourceRows)
 	progressStartCount(progress, "Fetching target issues for team comparison")
-	fetchedIssues, err := targetClient.SearchIssuesByKeys(issueKeys, []string{"summary", "project", "projectType", selection.Field.ID}, func(current, total int) {
+	fetchedIssues, err := targetClient.SearchIssuesByKeys(issueKeys, cfg.IssueProjectScope, []string{"summary", "project", "projectType", selection.Field.ID}, func(current, total int) {
 		progressUpdateCount(progress, current, total)
 	})
 	if err != nil {
@@ -371,7 +371,7 @@ func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationS
 
 	childIssueKeys := uniqueChildIssueKeysFromParentLinkRows(sourceRows)
 	progressStartCount(progress, "Fetching target child issues for Parent Link comparison")
-	childIssues, err := targetClient.SearchIssuesByKeys(childIssueKeys, []string{"summary", "project", "projectType", field.ID}, func(current, total int) {
+	childIssues, err := targetClient.SearchIssuesByKeys(childIssueKeys, cfg.IssueProjectScope, []string{"summary", "project", "projectType", field.ID}, func(current, total int) {
 		progressUpdateCount(progress, current, total)
 	})
 	if err != nil {
@@ -384,7 +384,7 @@ func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationS
 
 	parentIssueKeys := uniqueParentIssueKeysFromParentLinkRows(sourceRows)
 	progressStartCount(progress, "Fetching target parent issues for Parent Link comparison")
-	targetParents, err := targetClient.SearchIssuesByKeys(parentIssueKeys, []string{"summary", "project"}, func(current, total int) {
+	targetParents, err := targetClient.SearchIssuesByKeys(parentIssueKeys, cfg.IssueProjectScope, []string{"summary", "project"}, func(current, total int) {
 		progressUpdateCount(progress, current, total)
 	})
 	if err != nil {

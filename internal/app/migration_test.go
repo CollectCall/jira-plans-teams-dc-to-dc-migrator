@@ -3137,7 +3137,7 @@ func TestSearchIssuesByKeysChunksRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newJiraClient returned error: %v", err)
 	}
-	issues, err := client.SearchIssuesByKeys(keys, []string{"summary"}, nil)
+	issues, err := client.SearchIssuesByKeys(keys, "", []string{"summary"}, nil)
 	if err != nil {
 		t.Fatalf("SearchIssuesByKeys returned error: %v", err)
 	}
@@ -3146,6 +3146,33 @@ func TestSearchIssuesByKeysChunksRequests(t *testing.T) {
 	}
 	if len(issues) != 120 {
 		t.Fatalf("expected 120 issues, got %d", len(issues))
+	}
+}
+
+func TestSearchIssuesByKeysAppliesProjectScope(t *testing.T) {
+	var gotJQL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/rest/api/2/search" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		gotJQL = r.URL.Query().Get("jql")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"1","key":"ABC-1","fields":{"summary":"Issue 1"}}]}`))
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+	_, err = client.SearchIssuesByKeys([]string{"ABC-1"}, "ABC, DEF", []string{"summary"}, nil)
+	if err != nil {
+		t.Fatalf("SearchIssuesByKeys returned error: %v", err)
+	}
+
+	want := `project in ("ABC","DEF") AND (issuekey in ("ABC-1"))`
+	if gotJQL != want {
+		t.Fatalf("unexpected scoped JQL:\nwant: %q\ngot:  %q", want, gotJQL)
 	}
 }
 

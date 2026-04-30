@@ -319,7 +319,7 @@ func (c *jiraClient) SearchIssues(jql string, fields []string, progress func(cur
 	return all, nil
 }
 
-func (c *jiraClient) SearchIssuesByKeys(keys []string, fields []string, progress func(current, total int)) (map[string]JiraIssue, error) {
+func (c *jiraClient) SearchIssuesByKeys(keys []string, projectScope string, fields []string, progress func(current, total int)) (map[string]JiraIssue, error) {
 	out := map[string]JiraIssue{}
 	cleanKeys := uniqueTrimmedStrings(keys)
 	total := len(cleanKeys)
@@ -329,7 +329,7 @@ func (c *jiraClient) SearchIssuesByKeys(keys []string, fields []string, progress
 
 	processed := 0
 	for _, chunk := range chunkStrings(cleanKeys, issueKeySearchChunkSize) {
-		jql := fmt.Sprintf("issuekey in (%s)", quoteJQLValues(chunk))
+		jql := scopedIssueJQL(projectScope, fmt.Sprintf("issuekey in (%s)", quoteJQLValues(chunk)))
 		issues, err := c.SearchIssues(jql, fields, nil)
 		if err != nil {
 			return out, fmt.Errorf("searching target issues %d-%d of %d: %w", processed+1, processed+len(chunk), total, err)

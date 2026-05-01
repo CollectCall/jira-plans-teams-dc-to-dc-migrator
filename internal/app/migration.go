@@ -545,7 +545,7 @@ func preparePreMigrationFilterTargetMatchArtifacts(cfg Config, state *migrationS
 		return findings
 	}
 
-	fetchedFilters, fetchFindings := fetchTargetFiltersByID(targetClient, targetFilterIDs, state, progress)
+	fetchedFilters, fetchFindings := fetchTargetFiltersByID(targetClient, targetFilterIDs, targetFilterCandidatesByID(candidatesBySource), state, progress)
 	findings = append(findings, fetchFindings...)
 
 	matchRows, _ := buildPostMigrationFilterMatchAndComparisonRows(state.FilterTeamClauseRows, candidatesBySource, fetchedFilters, nil, matchMethodsBySource)
@@ -604,7 +604,7 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 		findings = append(findings, lookupFindings...)
 	}
 
-	fetchedFilters, fetchFindings := fetchTargetFiltersByID(targetClient, targetFilterIDs, state, progress)
+	fetchedFilters, fetchFindings := fetchTargetFiltersByID(targetClient, targetFilterIDs, targetFilterCandidatesByID(candidatesBySource), state, progress)
 	findings = append(findings, fetchFindings...)
 
 	snapshotRows := buildTargetFilterSnapshotRows(fetchedFilters)
@@ -701,32 +701,6 @@ func resolveTargetFilterCandidates(client *jiraClient, teamFieldID, fieldLabel s
 			targetFilterIDs[filter.ID] = struct{}{}
 		}
 	}
-	unresolvedSourceFilters := make([]FilterTeamClauseRow, 0)
-	for _, sourceFilter := range sourceFilters {
-		if len(candidatesBySource[sourceFilter.FilterID]) == 0 {
-			unresolvedSourceFilters = append(unresolvedSourceFilters, sourceFilter)
-		}
-	}
-	if len(unresolvedSourceFilters) > 0 {
-		allFilters, allFindings, err := loadAllTargetTeamFilters(client, teamFieldID, progress)
-		findings = append(findings, allFindings...)
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_jql_fallback_failed", fmt.Sprintf("Could not scan target filters for exact-JQL fallback: %v", err)))
-		} else {
-			for _, sourceFilter := range unresolvedSourceFilters {
-				fallbackFilters := targetFiltersMatchingSourceJQL(allFilters, sourceFilter)
-				if len(fallbackFilters) == 0 {
-					continue
-				}
-				candidatesBySource[sourceFilter.FilterID] = fallbackFilters
-				matchMethodsBySource[sourceFilter.FilterID] = filterMatchMethodExactJQL
-				for _, filter := range fallbackFilters {
-					targetFilterIDs[filter.ID] = struct{}{}
-				}
-				findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_filter_jql_fallback", fmt.Sprintf("Target filter lookup matched %d candidate(s) for %q by exact JQL after exact name/owner lookup found none", len(fallbackFilters), sourceFilter.FilterName)))
-			}
-		}
-	}
 	if resolveFiltersTask != nil {
 		resolveFiltersTask.Done()
 	}
@@ -782,7 +756,24 @@ func filterMatchMethodForStatus(status string) string {
 	}
 }
 
-func fetchTargetFiltersByID(client *jiraClient, targetFilterIDs map[string]struct{}, state *migrationState, progress *progressTracker) (map[string]JiraFilter, []Finding) {
+func targetFilterCandidatesByID(candidatesBySource map[string][]JiraFilter) map[string]JiraFilter {
+	byID := map[string]JiraFilter{}
+	for _, candidates := range candidatesBySource {
+		for _, candidate := range candidates {
+			id := strings.TrimSpace(candidate.ID)
+			if id == "" {
+				continue
+			}
+			if _, exists := byID[id]; exists {
+				continue
+			}
+			byID[id] = candidate
+		}
+	}
+	return byID
+}
+
+func fetchTargetFiltersByID(client *jiraClient, targetFilterIDs map[string]struct{}, candidateFiltersByID map[string]JiraFilter, state *migrationState, progress *progressTracker) (map[string]JiraFilter, []Finding) {
 	findings := []Finding{}
 	fetchedFilters := map[string]JiraFilter{}
 	filterIDs := make([]string, 0, len(targetFilterIDs))
@@ -791,6 +782,7 @@ func fetchTargetFiltersByID(client *jiraClient, targetFilterIDs map[string]struc
 	}
 	sort.Strings(filterIDs)
 	progressStartCount(progress, "Fetching matched target filters")
+	scriptRunnerJQLOverrides := 0
 	for i, id := range filterIDs {
 		progressUpdateCount(progress, i+1, len(filterIDs))
 		filter, err := client.GetFilter(id)
@@ -798,12 +790,19 @@ func fetchTargetFiltersByID(client *jiraClient, targetFilterIDs map[string]struc
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_fetch_failed", fmt.Sprintf("Could not fetch target filter %s: %v", id, err)))
 			continue
 		}
+		if candidate, ok := candidateFiltersByID[id]; ok && strings.TrimSpace(candidate.JQL) != "" && candidate.JQL != filter.JQL {
+			filter.JQL = candidate.JQL
+			scriptRunnerJQLOverrides++
+		}
 		fetchedFilters[id] = *filter
 		if state != nil {
 			state.TargetFilters = append(state.TargetFilters, *filter)
 		}
 	}
 	progressEnd(progress)
+	if scriptRunnerJQLOverrides > 0 {
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_filter_jql_from_scriptrunner", fmt.Sprintf("Used ScriptRunner JQL for %d target filter(s) because Jira REST returned a different JQL string", scriptRunnerJQLOverrides)))
+	}
 	return fetchedFilters, findings
 }
 
@@ -924,6 +923,13 @@ func loadTargetFiltersForSourceFilter(client *jiraClient, teamFieldID string, so
 	if len(fallbackFilters) == 0 {
 		return nil, filterMatchMethodNotFound, findings, nil
 	}
+	if len(fallbackFilters) > 1 {
+		jqlMatches := targetFiltersMatchingSourceJQL(fallbackFilters, sourceFilter)
+		if len(jqlMatches) == 1 {
+			findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_filter_name_ambiguous_jql_tiebreak", fmt.Sprintf("Target filter lookup found multiple exact-name candidates for %q and selected one by matching JQL", sourceFilter.FilterName)))
+			return jqlMatches, filterMatchMethodExactJQL, findings, nil
+		}
+	}
 	return fallbackFilters, filterMatchMethodExactName, findings, nil
 }
 
@@ -1003,86 +1009,6 @@ func loadTargetFiltersForSourceFilterQuery(client *jiraClient, teamFieldID strin
 		}
 	}
 	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_filter_lookup_summary", fmt.Sprintf("Target filter lookup scanned %d rows and found %d exact candidate filters for %q", totalScanned, len(deduped), sourceFilter.FilterName)))
-	return deduped, findings, nil
-}
-
-func loadAllTargetTeamFilters(client *jiraClient, teamFieldID string, progress *progressTracker) ([]JiraFilter, []Finding, error) {
-	var (
-		lastID           int64
-		totalScanned     int
-		totalParseErrors int
-		filters          []JiraFilter
-		parseErrors      []teamFilterParseError
-		task             *progressTask
-	)
-	if progress != nil {
-		task = progress.BeginTask("Scanning target filters for exact-JQL fallback")
-	}
-	defer func() {
-		if task != nil {
-			task.Done()
-		}
-	}()
-
-	for {
-		query := make(url.Values)
-		query.Set("enabled", "true")
-		query.Set("lastId", strconv.FormatInt(lastID, 10))
-		query.Set("limit", strconv.Itoa(teamFilterScriptRunnerPageSize))
-		query.Set("teamFieldId", teamFieldID)
-
-		body, err := client.doCoreJSON(http.MethodGet, targetTeamFilterScriptRunnerEndpointPath, query, nil)
-		if err != nil {
-			endpointURL, buildErr := buildURL(client.instanceBaseURL, targetTeamFilterScriptRunnerEndpointPath, query)
-			if buildErr != nil {
-				return nil, nil, err
-			}
-			return nil, nil, fmt.Errorf("calling target ScriptRunner endpoint %s: %w", endpointURL, err)
-		}
-
-		var response teamFilterScriptRunnerResponse
-		if err := json.Unmarshal(body, &response); err != nil {
-			return nil, nil, fmt.Errorf("parsing target ScriptRunner endpoint response: %w", err)
-		}
-
-		for _, result := range response.Results {
-			resultOwner := strings.TrimSpace(result.Owner)
-			resultOwnerEmail := strings.TrimSpace(result.OwnerEmail)
-			filter := JiraFilter{
-				ID:   strconv.FormatInt(result.ID, 10),
-				Name: result.Name,
-				JQL:  result.JQL,
-			}
-			if resultOwner != "" || resultOwnerEmail != "" {
-				filter.Owner = &JiraFilterUser{DisplayName: resultOwner, Name: resultOwner, Key: resultOwner, EmailAddress: resultOwnerEmail}
-			}
-			filters = append(filters, filter)
-		}
-
-		totalScanned += response.Meta.Scanned
-		totalParseErrors += response.Meta.ParseErrorCount
-		parseErrors = append(parseErrors, response.ParseErrors...)
-		if task != nil {
-			task.Update(totalScanned, totalScanned)
-			task.Detail(fmt.Sprintf("%d matched Team filters scanned", len(filters)))
-		}
-		if response.Meta.Scanned == 0 || response.Meta.NextLastID <= lastID || response.Meta.Scanned < teamFilterScriptRunnerPageSize {
-			break
-		}
-		lastID = response.Meta.NextLastID
-	}
-
-	deduped := deduplicateFiltersByID(filters)
-	findings := []Finding{}
-	if totalParseErrors > 0 {
-		parseErrorSamples := summarizeTeamFilterParseErrors(parseErrors, 3)
-		if parseErrorSamples != "" {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_jql_fallback_parse_errors", fmt.Sprintf("Target filter exact-JQL fallback skipped %d filters because their JQL could not be parsed: %s", totalParseErrors, parseErrorSamples)))
-		} else {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_jql_fallback_parse_errors", fmt.Sprintf("Target filter exact-JQL fallback skipped %d filters because their JQL could not be parsed", totalParseErrors)))
-		}
-	}
-	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_filter_jql_fallback_summary", fmt.Sprintf("Target filter exact-JQL fallback scanned %d rows and found %d Team filter candidate(s)", totalScanned, len(deduped))))
 	return deduped, findings, nil
 }
 
@@ -1989,6 +1915,8 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 			state = postState
 			findings = append(findings, postFindings...)
 		}
+		state, postFindings = rebuildStalePreparedFilterArtifactsIfNeeded(cfg, state)
+		findings = append(findings, postFindings...)
 		if needsPostMigrationTargetArtifactsPreparation(cfg, state) {
 			findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, progress)...)
 		}
@@ -2155,10 +2083,50 @@ func loadPostMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTra
 		state, inputFindings = loadPostMigrateTargetArtifactsFromExports(cfg, state, progress)
 		findings = append(findings, inputFindings...)
 	}
+	state, inputFindings = rebuildStalePreparedFilterArtifactsIfNeeded(cfg, state)
+	findings = append(findings, inputFindings...)
 	if needsPostMigrationTargetArtifactsPreparation(cfg, state) {
 		findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, progress)...)
 	}
 	return state, findings
+}
+
+func rebuildStalePreparedFilterArtifactsIfNeeded(cfg Config, state migrationState) (migrationState, []Finding) {
+	if !cfg.FilterTeamIDsInScope || len(state.FilterTeamClauseRows) == 0 {
+		return state, nil
+	}
+	if !targetFilterLookupAvailable(cfg) {
+		return state, nil
+	}
+	if !filterArtifactsContainNotFound(state.FilterTargetMatches, state.FilterComparisons) {
+		return state, nil
+	}
+
+	state.TargetFilters = nil
+	state.TargetFilterSnapshots = nil
+	state.FilterTargetMatches = nil
+	state.FilterComparisons = nil
+	return state, []Finding{newFinding(SeverityWarning, "post_migrate_filter_artifacts_rebuild_not_found", "Prepared filter artifacts contain not_found target matches; rebuilding filter target matching from the current target Jira instead of trusting stale not_found rows")}
+}
+
+func targetFilterLookupAvailable(cfg Config) bool {
+	return strings.TrimSpace(cfg.TargetBaseURL) != "" &&
+		strings.TrimSpace(cfg.TargetUsername) != "" &&
+		strings.TrimSpace(cfg.TargetPassword) != ""
+}
+
+func filterArtifactsContainNotFound(matchRows []PostMigrationFilterMatchRow, comparisonRows []PostMigrationFilterComparisonRow) bool {
+	for _, row := range matchRows {
+		if strings.TrimSpace(row.Status) == "not_found" || strings.TrimSpace(row.MatchMethod) == filterMatchMethodNotFound {
+			return true
+		}
+	}
+	for _, row := range comparisonRows {
+		if strings.TrimSpace(row.Status) == "not_found" && strings.TrimSpace(row.TargetFilterID) == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func loadPostMigrateTargetArtifactsFromExports(cfg Config, state migrationState, progress *progressTracker) (migrationState, []Finding) {

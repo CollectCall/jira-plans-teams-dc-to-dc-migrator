@@ -72,6 +72,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
 
     String filterName = queryParams.getFirst("filterName")
     String owner = queryParams.getFirst("owner")
+    String ownerEmail = queryParams.getFirst("ownerEmail")
 
     def namesCsv = queryParams.getFirst("namesCsv")?.split(",")*.trim()
     def ownersCsv = queryParams.getFirst("ownersCsv")?.split(",")*.trim()
@@ -79,6 +80,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     def norm = { it?.toLowerCase()?.trim() }
     def filterNameNorm = norm(filterName)
     def ownerNorm = norm(owner)
+    def ownerEmailNorm = norm(ownerEmail)
     def namesNorm = normalizedValues(namesCsv)
     def ownersNorm = normalizedValues(ownersCsv)
 
@@ -109,32 +111,37 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
             throw new UnsupportedOperationException("Database product does not support this endpoint's LIMIT query path: ${DB_PRODUCT}")
         }
 
-        def whereParts = ["id > ?"]
+        def whereParts = ["sr.id > ?"]
         def params = [lastId]
 
         if (filterNameNorm) {
-            whereParts << "LOWER(filtername) = ?"
+            whereParts << "LOWER(sr.filtername) = ?"
             params << filterNameNorm
         } else if (namesNorm) {
-            whereParts << "LOWER(filtername) IN (${placeholders(namesNorm.size())})"
+            whereParts << "LOWER(sr.filtername) IN (${placeholders(namesNorm.size())})"
             params.addAll(namesNorm)
         }
 
         if (ownerNorm) {
-            whereParts << "LOWER(authorname) = ?"
+            whereParts << "LOWER(sr.authorname) = ?"
             params << ownerNorm
+        } else if (ownerEmailNorm) {
+            whereParts << "LOWER(cu.email_address) = ?"
+            params << ownerEmailNorm
         } else if (ownersNorm) {
-            whereParts << "LOWER(authorname) IN (${placeholders(ownersNorm.size())})"
+            whereParts << "LOWER(sr.authorname) IN (${placeholders(ownersNorm.size())})"
             params.addAll(ownersNorm)
         }
 
         params << limit
 
         def query = """
-            SELECT id, filtername, authorname, reqcontent
-            FROM searchrequest
+            SELECT sr.id, sr.filtername, sr.authorname, cu.email_address AS owner_email, sr.reqcontent
+            FROM searchrequest sr
+            LEFT JOIN app_user au ON LOWER(sr.authorname) = LOWER(au.user_key) OR LOWER(sr.authorname) = LOWER(au.lower_user_name)
+            LEFT JOIN cwd_user cu ON au.lower_user_name = cu.lower_user_name
             WHERE ${whereParts.join(" AND ")}
-            ORDER BY id
+            ORDER BY sr.id
             LIMIT ?
         """.toString()
 
@@ -149,6 +156,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
 
                 def name = row.filtername as String
                 def author = row.authorname as String
+                def authorEmail = row.owner_email as String
                 def jql = row.reqcontent as String
 
                 if (!jql) return
@@ -162,6 +170,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
                     id   : id,
                     name : name,
                     owner: author,
+                    ownerEmail: authorEmail,
                     jql  : jql
                 ]
             }
@@ -189,13 +198,16 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
             def searchRequest = searchRequestManager.getSearchRequestById(id)
             def name = searchRequest?.name
             def author = searchRequest?.owner?.name
+            def authorEmail = searchRequest?.owner?.emailAddress
             def jql = searchRequest?.query?.queryString
 
             def nameNorm = norm(name)
             def authorNorm = norm(author)
+            def authorEmailNorm = norm(authorEmail)
 
             if (filterNameNorm && nameNorm != filterNameNorm) continue
             if (ownerNorm && authorNorm != ownerNorm) continue
+            if (ownerEmailNorm && authorEmailNorm != ownerEmailNorm) continue
             if (namesNorm && !namesNorm.contains(nameNorm)) continue
             if (ownersNorm && !ownersNorm.contains(authorNorm)) continue
 
@@ -210,6 +222,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
                 id   : id,
                 name : name,
                 owner: author,
+                ownerEmail: authorEmail,
                 jql  : jql
             ]
         }

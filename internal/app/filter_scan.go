@@ -25,10 +25,11 @@ type teamFilterScriptRunnerResponse struct {
 		DBMode          string `json:"dbMode"`
 	} `json:"meta"`
 	Results []struct {
-		ID    int64  `json:"id"`
-		Name  string `json:"name"`
-		Owner string `json:"owner"`
-		JQL   string `json:"jql"`
+		ID         int64  `json:"id"`
+		Name       string `json:"name"`
+		Owner      string `json:"owner"`
+		OwnerEmail string `json:"ownerEmail"`
+		JQL        string `json:"jql"`
 	} `json:"results"`
 	ParseErrors []teamFilterParseError `json:"parseErrors"`
 }
@@ -123,6 +124,7 @@ func loadFiltersFromSourceCSV(path string) ([]JiraFilter, error) {
 	idIndex := findCSVHeaderIndex(header, "filter id", "id")
 	nameIndex := findCSVHeaderIndex(header, "filter name", "name", "filtername")
 	ownerIndex := findCSVHeaderIndex(header, "owner", "author", "authorname")
+	ownerEmailIndex := findCSVHeaderIndex(header, "owner email", "owneremail", "email", "emailaddress")
 
 	filters := make([]JiraFilter, 0, len(records)-1)
 	for _, record := range records[1:] {
@@ -135,8 +137,10 @@ func loadFiltersFromSourceCSV(path string) ([]JiraFilter, error) {
 			Name: csvRecordValue(record, nameIndex),
 			JQL:  jql,
 		}
-		if owner := csvRecordValue(record, ownerIndex); owner != "" {
-			filter.Owner = &JiraFilterUser{DisplayName: owner, Name: owner, Key: owner}
+		owner := csvRecordValue(record, ownerIndex)
+		ownerEmail := csvRecordValue(record, ownerEmailIndex)
+		if owner != "" || ownerEmail != "" {
+			filter.Owner = &JiraFilterUser{DisplayName: owner, Name: owner, Key: owner, EmailAddress: ownerEmail}
 		}
 		filters = append(filters, filter)
 	}
@@ -185,8 +189,9 @@ func loadFiltersViaTeamFilterScriptRunner(client *jiraClient, progress func(curr
 				Name: result.Name,
 				JQL:  result.JQL,
 			}
-			if owner != "" {
-				filter.Owner = &JiraFilterUser{DisplayName: owner, Name: owner, Key: owner}
+			ownerEmail := strings.TrimSpace(result.OwnerEmail)
+			if owner != "" || ownerEmail != "" {
+				filter.Owner = &JiraFilterUser{DisplayName: owner, Name: owner, Key: owner, EmailAddress: ownerEmail}
 			}
 			filters = append(filters, filter)
 		}
@@ -259,6 +264,7 @@ func buildFilterTeamClauseRows(filters []JiraFilter, teams []TeamDTO) []FilterTe
 				FilterID:    filter.ID,
 				FilterName:  filter.Name,
 				Owner:       filterOwnerLabel(filter.Owner),
+				OwnerEmail:  filterOwnerEmail(filter.Owner),
 				ClauseValue: value,
 				Clause:      clause,
 				JQL:         filter.JQL,
@@ -415,6 +421,7 @@ func writeFilterTeamClauseExport(cfg Config, rows []FilterTeamClauseRow) (string
 		"Filter ID",
 		"Filter Name",
 		"Owner",
+		"Owner Email",
 		"Match Type",
 		"Clause Value",
 		"Source Team ID",
@@ -427,6 +434,7 @@ func writeFilterTeamClauseExport(cfg Config, rows []FilterTeamClauseRow) (string
 			row.FilterID,
 			row.FilterName,
 			row.Owner,
+			row.OwnerEmail,
 			row.MatchType,
 			row.ClauseValue,
 			row.SourceTeamID,
@@ -472,6 +480,13 @@ func filterOwnerLabel(owner *JiraFilterUser) string {
 		}
 	}
 	return ""
+}
+
+func filterOwnerEmail(owner *JiraFilterUser) string {
+	if owner == nil {
+		return ""
+	}
+	return strings.TrimSpace(owner.EmailAddress)
 }
 
 func countDistinctFilterIDs(rows []FilterTeamClauseRow) int {

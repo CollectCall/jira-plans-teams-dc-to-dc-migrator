@@ -157,9 +157,10 @@ type JiraFilter struct {
 }
 
 type JiraFilterUser struct {
-	Name        string `json:"name,omitempty"`
-	Key         string `json:"key,omitempty"`
-	DisplayName string `json:"displayName,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Key          string `json:"key,omitempty"`
+	DisplayName  string `json:"displayName,omitempty"`
+	EmailAddress string `json:"emailAddress,omitempty"`
 }
 
 type HierarchyLevelDTO struct {
@@ -225,6 +226,7 @@ type FilterTeamClauseRow struct {
 	FilterID       string `json:"filterId"`
 	FilterName     string `json:"filterName"`
 	Owner          string `json:"owner,omitempty"`
+	OwnerEmail     string `json:"ownerEmail,omitempty"`
 	MatchType      string `json:"matchType"`
 	ClauseValue    string `json:"clauseValue"`
 	SourceTeamID   string `json:"sourceTeamId,omitempty"`
@@ -332,6 +334,7 @@ type PostMigrationFilterMatchRow struct {
 	TargetFilterID   string `json:"targetFilterId,omitempty"`
 	TargetFilterName string `json:"targetFilterName,omitempty"`
 	TargetOwner      string `json:"targetOwner,omitempty"`
+	MatchMethod      string `json:"matchMethod,omitempty"`
 	Status           string `json:"status"`
 	Reason           string `json:"reason,omitempty"`
 }

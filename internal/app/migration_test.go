@@ -1728,6 +1728,7 @@ func TestBuildPostMigrationFilterComparisonRowsRewriteNormalizedTargetClause(t *
 			},
 		},
 		[]TeamMapping{{SourceTeamID: 426, SourceTitle: "Orange Team", TargetTeamID: "9426", TargetTitle: "Orange Team", Decision: "merge"}},
+		map[string]string{"10000": filterMatchMethodOwner},
 	)
 
 	if len(matchRows) != 1 || matchRows[0].Status != "matched" {
@@ -1770,8 +1771,8 @@ func TestWriteFilterTeamClauseExportWritesCSV(t *testing.T) {
 
 	records := readCSVRecords(t, path)
 	want := [][]string{
-		{"Filter ID", "Filter Name", "Owner", "Match Type", "Clause Value", "Source Team ID", "Source Team Name", "Matched Clause", "JQL"},
-		{"10000", "Named Team Filter", "Jane Doe", "team_name", "Blue Team", "7", "Blue Team", `"Team" = "Blue Team"`, `project = ABC AND "Team" = "Blue Team"`},
+		{"Filter ID", "Filter Name", "Owner", "Owner Email", "Match Type", "Clause Value", "Source Team ID", "Source Team Name", "Matched Clause", "JQL"},
+		{"10000", "Named Team Filter", "Jane Doe", "", "team_name", "Blue Team", "7", "Blue Team", `"Team" = "Blue Team"`, `project = ABC AND "Team" = "Blue Team"`},
 	}
 	if !reflect.DeepEqual(records, want) {
 		t.Fatalf("unexpected filter scan CSV:\nwant: %#v\ngot:  %#v", want, records)
@@ -1995,8 +1996,8 @@ func TestWritePostMigrationFilterTeamExportWritesCSV(t *testing.T) {
 
 	records := readCSVRecords(t, path)
 	want := [][]string{
-		{"Filter ID", "Filter Name", "Owner", "Match Type", "Clause Value", "Source Team ID", "Source Team Name", "Matched Clause", "JQL", "Target Team ID"},
-		{"10000", "Numeric Team Filter", "Jane Doe", "team_id", "42", "42", "Red Team", "Team = 42", "project = ABC AND Team = 42", "1042"},
+		{"Filter ID", "Filter Name", "Owner", "Owner Email", "Match Type", "Clause Value", "Source Team ID", "Source Team Name", "Matched Clause", "JQL", "Target Team ID"},
+		{"10000", "Numeric Team Filter", "Jane Doe", "", "team_id", "42", "42", "Red Team", "Team = 42", "project = ABC AND Team = 42", "1042"},
 	}
 	if !reflect.DeepEqual(records, want) {
 		t.Fatalf("unexpected post-migration filter mapping CSV:\nwant: %#v\ngot:  %#v", want, records)
@@ -2172,8 +2173,8 @@ func TestExecuteMigrationWithStateWritesPostMigrationPreparationArtifactsAfterAp
 	}
 	filterRecords := readCSVRecords(t, filterPath)
 	wantFilter := [][]string{
-		{"Filter ID", "Filter Name", "Owner", "Match Type", "Clause Value", "Source Team ID", "Source Team Name", "Matched Clause", "JQL", "Target Team ID"},
-		{"10000", "Numeric Team Filter", "Jane Doe", "team_id", "42", "42", "Red Team", "Team = 42", "project = ABC AND Team = 42", "1234"},
+		{"Filter ID", "Filter Name", "Owner", "Owner Email", "Match Type", "Clause Value", "Source Team ID", "Source Team Name", "Matched Clause", "JQL", "Target Team ID"},
+		{"10000", "Numeric Team Filter", "Jane Doe", "", "team_id", "42", "42", "Red Team", "Team = 42", "project = ABC AND Team = 42", "1234"},
 	}
 	if !reflect.DeepEqual(filterRecords, wantFilter) {
 		t.Fatalf("unexpected post-migration filter artifact:\nwant: %#v\ngot:  %#v", wantFilter, filterRecords)
@@ -2277,8 +2278,8 @@ func TestPreparePostMigrationTargetFilterArtifactsWritesSnapshotMatchAndComparis
 	}
 	matchRecords := readCSVRecords(t, matchPath)
 	wantMatch := [][]string{
-		{"Source Filter ID", "Source Filter Name", "Source Owner", "Target Filter ID", "Target Filter Name", "Target Owner", "Status", "Reason"},
-		{"10000", "Numeric Team Filter", "Jane Doe", "9001", "Numeric Team Filter", "Jane Doe", "matched", ""},
+		{"Source Filter ID", "Source Filter Name", "Source Owner", "Target Filter ID", "Target Filter Name", "Target Owner", "Match Method", "Status", "Reason"},
+		{"10000", "Numeric Team Filter", "Jane Doe", "9001", "Numeric Team Filter", "Jane Doe", "matched_by_owner", "matched", ""},
 	}
 	if !reflect.DeepEqual(matchRecords, wantMatch) {
 		t.Fatalf("unexpected filter target match CSV:\nwant: %#v\ngot:  %#v", wantMatch, matchRecords)
@@ -2351,8 +2352,8 @@ func TestPreparePreMigrationFilterTargetMatchArtifactsWritesReusableFilterIDMapp
 	}
 	matchRecords := readCSVRecords(t, matchPath)
 	wantMatch := [][]string{
-		{"Source Filter ID", "Source Filter Name", "Source Owner", "Target Filter ID", "Target Filter Name", "Target Owner", "Status", "Reason"},
-		{"10000", "Numeric Team Filter", "Jane Doe", "9001", "Numeric Team Filter", "Jane Doe", "matched", ""},
+		{"Source Filter ID", "Source Filter Name", "Source Owner", "Target Filter ID", "Target Filter Name", "Target Owner", "Match Method", "Status", "Reason"},
+		{"10000", "Numeric Team Filter", "Jane Doe", "9001", "Numeric Team Filter", "Jane Doe", "matched_by_owner", "matched", ""},
 	}
 	if !reflect.DeepEqual(matchRecords, wantMatch) {
 		t.Fatalf("unexpected pre-migration filter target match CSV:\nwant: %#v\ngot:  %#v", wantMatch, matchRecords)
@@ -2520,7 +2521,7 @@ func TestLoadTargetFiltersForSourceFilterAcceptsQuotedNumericTeamJQL(t *testing.
 		t.Fatalf("newJiraClient returned error: %v", err)
 	}
 
-	filters, findings, err := loadTargetFiltersForSourceFilter(client, "16604", FilterTeamClauseRow{
+	filters, _, findings, err := loadTargetFiltersForSourceFilter(client, "16604", FilterTeamClauseRow{
 		FilterName: "Tes filter for Team",
 		Owner:      "Jane Doe",
 	}, nil)
@@ -2540,7 +2541,7 @@ func TestLoadTargetFiltersForSourceFilterAcceptsQuotedNumericTeamJQL(t *testing.
 	}
 }
 
-func TestLoadTargetFiltersForSourceFilterRetriesWithoutOwnerForExactJQLMatch(t *testing.T) {
+func TestLoadTargetFiltersForSourceFilterRetriesWithoutOwnerForExactNameMatch(t *testing.T) {
 	jql := "project = ABC AND Team = 42"
 	var requests []url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2552,7 +2553,7 @@ func TestLoadTargetFiltersForSourceFilterRetriesWithoutOwnerForExactJQLMatch(t *
 				_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":0,"scanned":14747,"matched":0,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[],"parseErrors":[]}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":21402,"scanned":1,"matched":1,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[{"id":21402,"name":"Numeric Team Filter","owner":"jdoe","jql":` + strconv.Quote(jql) + `}],"parseErrors":[]}`))
+			_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":21402,"scanned":1,"matched":1,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[{"id":21402,"name":"Numeric Team Filter","owner":"jdoe","jql":"project = ABC AND Team = 142"}],"parseErrors":[]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -2564,7 +2565,7 @@ func TestLoadTargetFiltersForSourceFilterRetriesWithoutOwnerForExactJQLMatch(t *
 		t.Fatalf("newJiraClient returned error: %v", err)
 	}
 
-	filters, findings, err := loadTargetFiltersForSourceFilter(client, "16604", FilterTeamClauseRow{
+	filters, _, findings, err := loadTargetFiltersForSourceFilter(client, "16604", FilterTeamClauseRow{
 		FilterName: "Numeric Team Filter",
 		Owner:      "Jane Doe",
 		JQL:        jql,
@@ -2573,7 +2574,7 @@ func TestLoadTargetFiltersForSourceFilterRetriesWithoutOwnerForExactJQLMatch(t *
 		t.Fatalf("loadTargetFiltersForSourceFilter returned error: %v", err)
 	}
 	if len(filters) != 1 || filters[0].ID != "21402" {
-		t.Fatalf("expected exact-JQL fallback target filter, got %#v", filters)
+		t.Fatalf("expected exact-name fallback target filter, got %#v", filters)
 	}
 	if len(requests) != 2 {
 		t.Fatalf("expected owner-scoped lookup and ownerless retry, got %d request(s)", len(requests))
@@ -2592,6 +2593,86 @@ func TestLoadTargetFiltersForSourceFilterRetriesWithoutOwnerForExactJQLMatch(t *
 	}
 	if !foundRetryFinding {
 		t.Fatalf("expected owner retry finding, got %#v", findings)
+	}
+}
+
+func TestLoadTargetFiltersForSourceFilterUsesOwnerEmailBeforeOwnerName(t *testing.T) {
+	var requests []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB":
+			requests = append(requests, r.URL.Query())
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Query().Get("ownerEmail") == "jane@example.com":
+				_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":21402,"scanned":1,"matched":1,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[{"id":21402,"name":"Numeric Team Filter","owner":"target-jane","ownerEmail":"jane@example.com","jql":"project = ABC AND Team = 142"}],"parseErrors":[]}`))
+			case r.URL.Query().Get("owner") == "source-jane":
+				t.Fatal("owner-name lookup should not run after owner-email match")
+			default:
+				t.Fatalf("unexpected query %q", r.URL.RawQuery)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	filters, _, _, err := loadTargetFiltersForSourceFilter(client, "16604", FilterTeamClauseRow{
+		FilterName: "Numeric Team Filter",
+		Owner:      "source-jane",
+		OwnerEmail: "jane@example.com",
+		JQL:        "project = ABC AND Team = 42",
+	}, nil)
+	if err != nil {
+		t.Fatalf("loadTargetFiltersForSourceFilter returned error: %v", err)
+	}
+	if len(filters) != 1 || filters[0].ID != "21402" {
+		t.Fatalf("expected owner-email target filter, got %#v", filters)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one owner-email lookup, got %d", len(requests))
+	}
+	if requests[0].Get("ownerEmail") != "jane@example.com" || requests[0].Get("owner") != "" {
+		t.Fatalf("expected ownerEmail-only query, got %q", requests[0].Encode())
+	}
+}
+
+func TestLoadTargetFiltersForSourceFilterReturnsAmbiguousExactNameMatches(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB":
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Query().Get("owner") == "Jane Doe" {
+				_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":0,"scanned":0,"matched":0,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[],"parseErrors":[]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":21403,"scanned":2,"matched":2,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[{"id":21402,"name":"Numeric Team Filter","owner":"owner-one","jql":"project = ABC AND Team = 42"},{"id":21403,"name":"Numeric Team Filter","owner":"owner-two","jql":"project = DEF AND Team = 43"}],"parseErrors":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	filters, _, _, err := loadTargetFiltersForSourceFilter(client, "16604", FilterTeamClauseRow{
+		FilterName: "Numeric Team Filter",
+		Owner:      "Jane Doe",
+		JQL:        "project = ABC AND Team = 42",
+	}, nil)
+	if err != nil {
+		t.Fatalf("loadTargetFiltersForSourceFilter returned error: %v", err)
+	}
+	if len(filters) != 2 {
+		t.Fatalf("expected ambiguous exact-name target filters, got %#v", filters)
 	}
 }
 
@@ -3454,6 +3535,185 @@ func TestApplyPostMigrationIssueCorrectionsKeepsBuiltInRetryForNonTooManyRequest
 	}
 	if strings.Contains(results[0].Message, "reduced concurrency") {
 		t.Fatalf("did not expect fallback message after built-in 502 retry, got %q", results[0].Message)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsRetriesDriftCheckTooManyRequestsWithFallbackWorkers(t *testing.T) {
+	state := postMigrationIssueWorkerTestState(3)
+	var mu sync.Mutex
+	getRequestsByIssue := map[string]int{}
+	putRequestsByIssue := map[string]int{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			issueKey := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			mu.Lock()
+			getRequestsByIssue[issueKey]++
+			attempt := getRequestsByIssue[issueKey]
+			mu.Unlock()
+			if issueKey == "TP-2" && attempt == 1 {
+				http.Error(w, "too many requests", http.StatusTooManyRequests)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"id":"%d","key":%q,"fields":{"customfield_16604":[{"id":4}]}}`, attempt, issueKey)))
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			issueKey := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			mu.Lock()
+			putRequestsByIssue[issueKey]++
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(Config{}, client, &state, &progressTask{})
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings after successful drift-check fallback retry: %#v", findings)
+	}
+	for i, result := range results {
+		expectedIssue := fmt.Sprintf("TP-%d", i+1)
+		if result.IssueKey != expectedIssue || result.Status != "updated" {
+			t.Fatalf("unexpected result at %d: %#v", i, result)
+		}
+	}
+	if got := getRequestsByIssue["TP-2"]; got != 2 {
+		t.Fatalf("expected TP-2 drift-check GET to be retried through fallback, got %d", got)
+	}
+	if got := putRequestsByIssue["TP-2"]; got != 1 {
+		t.Fatalf("expected TP-2 to be updated once after fallback, got %d PUTs", got)
+	}
+	if !strings.Contains(results[1].Message, "reduced concurrency from 5 to 3") {
+		t.Fatalf("expected fallback retry message for TP-2, got %q", results[1].Message)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsKeepsBuiltInDriftCheckRetryForNonTooManyRequests(t *testing.T) {
+	state := postMigrationIssueWorkerTestState(2)
+	var mu sync.Mutex
+	getRequestsByIssue := map[string]int{}
+	putRequestsByIssue := map[string]int{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			issueKey := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			mu.Lock()
+			getRequestsByIssue[issueKey]++
+			attempt := getRequestsByIssue[issueKey]
+			mu.Unlock()
+			if issueKey == "TP-1" && attempt == 1 {
+				http.Error(w, "bad gateway", http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"id":"%d","key":%q,"fields":{"customfield_16604":[{"id":4}]}}`, attempt, issueKey)))
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			issueKey := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			mu.Lock()
+			putRequestsByIssue[issueKey]++
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(Config{}, client, &state, &progressTask{})
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings after built-in drift-check retry success: %#v", findings)
+	}
+	for i, result := range results {
+		if result.IssueKey != fmt.Sprintf("TP-%d", i+1) || result.Status != "updated" {
+			t.Fatalf("unexpected result at %d: %#v", i, result)
+		}
+	}
+	if got := getRequestsByIssue["TP-1"]; got != 2 {
+		t.Fatalf("expected TP-1 GET to use built-in retry after 502, got %d requests", got)
+	}
+	if got := putRequestsByIssue["TP-1"]; got != 1 {
+		t.Fatalf("expected TP-1 to receive one PUT request, got %d", got)
+	}
+	if strings.Contains(results[0].Message, "reduced concurrency") {
+		t.Fatalf("did not expect fallback message after built-in GET 502 retry, got %q", results[0].Message)
+	}
+}
+
+func TestResolveTargetFilterCandidatesFallsBackToExactJQLWhenNameOwnerLookupMisses(t *testing.T) {
+	sourceJQL := "project = ABC AND Team = 42"
+	var sawGlobalFallback bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB":
+			w.Header().Set("Content-Type", "application/json")
+			query := r.URL.Query()
+			switch {
+			case query.Get("filterName") == "Source Filter" && query.Get("owner") == "Jane Doe":
+				_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":0,"scanned":0,"matched":0,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[],"parseErrors":[]}`))
+			case query.Get("filterName") == "Source Filter" && query.Get("owner") == "":
+				_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":0,"scanned":0,"matched":0,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[],"parseErrors":[]}`))
+			case query.Get("filterName") == "" && query.Get("owner") == "":
+				sawGlobalFallback = true
+				_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":9001,"scanned":2,"matched":2,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[{"id":9001,"name":"Renamed Target Filter","owner":"target-owner","jql":` + strconv.Quote(sourceJQL) + `},{"id":9002,"name":"Other Filter","owner":"target-owner","jql":"project = XYZ AND Team = 99"}],"parseErrors":[]}`))
+			default:
+				t.Fatalf("unexpected target filter query %q", query.Encode())
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	findings, candidatesBySource, targetIDs, matchMethods := resolveTargetFilterCandidates(client, "16604", "Team", []FilterTeamClauseRow{{
+		FilterID:   "10000",
+		FilterName: "Source Filter",
+		Owner:      "Jane Doe",
+		MatchType:  "team_id",
+		JQL:        sourceJQL,
+	}}, nil)
+	if hasErrors(findings) {
+		t.Fatalf("unexpected errors resolving target filters: %#v", findings)
+	}
+	if !sawGlobalFallback {
+		t.Fatal("expected global exact-JQL fallback lookup")
+	}
+	candidates := candidatesBySource["10000"]
+	if len(candidates) != 1 || candidates[0].ID != "9001" {
+		t.Fatalf("expected exact-JQL fallback candidate 9001, got %#v", candidates)
+	}
+	if _, ok := targetIDs["9001"]; !ok {
+		t.Fatalf("expected target filter ID 9001 to be fetched, got %#v", targetIDs)
+	}
+	if matchMethods["10000"] != filterMatchMethodExactJQL {
+		t.Fatalf("expected exact-JQL match method, got %#v", matchMethods)
+	}
+	foundFallbackFinding := false
+	for _, finding := range findings {
+		if finding.Code == "post_migrate_target_filter_jql_fallback" {
+			foundFallbackFinding = true
+		}
+	}
+	if !foundFallbackFinding {
+		t.Fatalf("expected exact-JQL fallback finding, got %#v", findings)
 	}
 }
 

@@ -1,14 +1,19 @@
 bin/
+build/
+dist/
 .gocache/
 .gomodcache/
 .gopath/
 .tmp-go-build-cache/
 out/
+tmp/
 .tmp-e2e/
 .tmp-e2e-*/
 .tmp-playwright/
 .local-runbooks/
 teams-migrator
+teams-migrator-v*
+coverage.out
 *.log
 *.hprof
 *.heapdump
@@ -32,3 +37,10 @@ SPECIFICATIONS.md
 FUTURE_IMPLEMENTATIONS.md
 portfolio_for_Jira_-_team_management_api_swagger.json
 portfolio_for_jira_api_swagger.json
+
+# Local regression/runbook notes generated during customer-specific testing.
+docs/customer-regression-test-plan.md
+docs/docker-regression-scenarios.md
+docs/testing-environments.md
+infra/aws-jira-dc-lab/
+docker/

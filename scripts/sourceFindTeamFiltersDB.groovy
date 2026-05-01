@@ -117,10 +117,12 @@ findSourceTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
         DatabaseUtil.withSql('local') { sql ->
 
             def rows = sql.rows("""
-                SELECT id, filtername, authorname, reqcontent
-                FROM searchrequest
-                WHERE id > ${lastId}
-                ORDER BY id
+                SELECT sr.id, sr.filtername, sr.authorname, cu.email_address AS owner_email, sr.reqcontent
+                FROM searchrequest sr
+                LEFT JOIN app_user au ON LOWER(sr.authorname) = LOWER(au.user_key) OR LOWER(sr.authorname) = LOWER(au.lower_user_name)
+                LEFT JOIN cwd_user cu ON au.lower_user_name = cu.lower_user_name
+                WHERE sr.id > ${lastId}
+                ORDER BY sr.id
                 LIMIT ${limit}
             """)
 
@@ -128,7 +130,7 @@ findSourceTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
                 def id = (row.id as Long)
                 scanned++
                 lastScannedId = id
-                processSingle(id, row.filtername as String, row.authorname as String, row.reqcontent as String, jqlParser, teamFieldId, results, parseErrors)
+                processSingle(id, row.filtername as String, row.authorname as String, row.owner_email as String, row.reqcontent as String, jqlParser, teamFieldId, results, parseErrors)
             }
         }
 
@@ -149,9 +151,10 @@ findSourceTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
             def searchRequest = searchRequestManager.getSearchRequestById(id)
             def name = searchRequest?.name
             def author = searchRequest?.owner?.name
+            def ownerEmail = searchRequest?.owner?.emailAddress
             def jql = searchRequest?.query?.queryString
 
-            processSingle(id, name, author, jql, jqlParser, teamFieldId, results, parseErrors)
+            processSingle(id, name, author, ownerEmail, jql, jqlParser, teamFieldId, results, parseErrors)
         }
     }
 
@@ -178,7 +181,7 @@ findSourceTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
 // PROCESS
 // =========================
 
-def processSingle(id, name, owner, jql, parser, teamFieldId, results, parseErrors) {
+def processSingle(id, name, owner, ownerEmail, jql, parser, teamFieldId, results, parseErrors) {
     if (!jql) return
 
     def lower = jql.toLowerCase()
@@ -190,6 +193,7 @@ def processSingle(id, name, owner, jql, parser, teamFieldId, results, parseError
         id    : id,
         name  : name,
         owner : owner,
+        ownerEmail: ownerEmail,
         jql   : jql
     ]
 }

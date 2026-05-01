@@ -1434,6 +1434,7 @@ func filterMatchRowsFromValue(value any) []PostMigrationFilterMatchRow {
 				TargetFilterID:   asString(row["targetFilterId"]),
 				TargetFilterName: asString(row["targetFilterName"]),
 				TargetOwner:      asString(row["targetOwner"]),
+				MatchMethod:      asString(row["matchMethod"]),
 				Status:           asString(row["status"]),
 				Reason:           asString(row["reason"]),
 			})

@@ -47,20 +47,32 @@ func loadFilterTeamClauseRowsFromExport(path string) ([]FilterTeamClauseRow, err
 	}
 
 	rows := make([]FilterTeamClauseRow, 0, len(records)-1)
+	header := mapCSVHeaderIndexes(records[0])
+	filterIDIndex := findCSVHeaderIndex(header, "filter id", "filterid")
+	filterNameIndex := findCSVHeaderIndex(header, "filter name", "filtername")
+	ownerIndex := findCSVHeaderIndex(header, "owner", "source owner", "author", "authorname")
+	ownerEmailIndex := findCSVHeaderIndex(header, "owner email", "owneremail", "source owner email", "sourceowneremail")
+	matchTypeIndex := findCSVHeaderIndex(header, "match type", "matchtype")
+	clauseValueIndex := findCSVHeaderIndex(header, "clause value", "clausevalue")
+	sourceTeamIDIndex := findCSVHeaderIndex(header, "source team id", "sourceteamid")
+	sourceTeamNameIndex := findCSVHeaderIndex(header, "source team name", "sourceteamname")
+	clauseIndex := findCSVHeaderIndex(header, "matched clause", "clause")
+	jqlIndex := findCSVHeaderIndex(header, "jql")
 	for _, record := range records[1:] {
 		if len(record) < 9 {
 			return nil, fmt.Errorf("filter export row has %d column(s), expected 9", len(record))
 		}
 		rows = append(rows, FilterTeamClauseRow{
-			FilterID:       record[0],
-			FilterName:     record[1],
-			Owner:          record[2],
-			MatchType:      record[3],
-			ClauseValue:    record[4],
-			SourceTeamID:   record[5],
-			SourceTeamName: record[6],
-			Clause:         record[7],
-			JQL:            record[8],
+			FilterID:       csvRecordValue(record, filterIDIndex),
+			FilterName:     csvRecordValue(record, filterNameIndex),
+			Owner:          csvRecordValue(record, ownerIndex),
+			OwnerEmail:     csvRecordValue(record, ownerEmailIndex),
+			MatchType:      csvRecordValue(record, matchTypeIndex),
+			ClauseValue:    csvRecordValue(record, clauseValueIndex),
+			SourceTeamID:   csvRecordValue(record, sourceTeamIDIndex),
+			SourceTeamName: csvRecordValue(record, sourceTeamNameIndex),
+			Clause:         csvRecordValue(record, clauseIndex),
+			JQL:            csvRecordValue(record, jqlIndex),
 		})
 	}
 	return rows, nil
@@ -278,20 +290,31 @@ func loadPostMigrationFilterMatchRowsFromExport(path string) ([]PostMigrationFil
 	if len(records) <= 1 {
 		return nil, nil
 	}
+	header := mapCSVHeaderIndexes(records[0])
+	sourceFilterIDIndex := findCSVHeaderIndex(header, "source filter id", "sourcefilterid")
+	sourceFilterNameIndex := findCSVHeaderIndex(header, "source filter name", "sourcefiltername")
+	sourceOwnerIndex := findCSVHeaderIndex(header, "source owner", "sourceowner")
+	targetFilterIDIndex := findCSVHeaderIndex(header, "target filter id", "targetfilterid")
+	targetFilterNameIndex := findCSVHeaderIndex(header, "target filter name", "targetfiltername")
+	targetOwnerIndex := findCSVHeaderIndex(header, "target owner", "targetowner")
+	matchMethodIndex := findCSVHeaderIndex(header, "match method", "matchmethod")
+	statusIndex := findCSVHeaderIndex(header, "status")
+	reasonIndex := findCSVHeaderIndex(header, "reason")
 	rows := make([]PostMigrationFilterMatchRow, 0, len(records)-1)
 	for _, record := range records[1:] {
 		if len(record) < 8 {
 			return nil, fmt.Errorf("filter target match row has %d column(s), expected 8", len(record))
 		}
 		rows = append(rows, PostMigrationFilterMatchRow{
-			SourceFilterID:   record[0],
-			SourceFilterName: record[1],
-			SourceOwner:      record[2],
-			TargetFilterID:   record[3],
-			TargetFilterName: record[4],
-			TargetOwner:      record[5],
-			Status:           record[6],
-			Reason:           record[7],
+			SourceFilterID:   csvRecordValue(record, sourceFilterIDIndex),
+			SourceFilterName: csvRecordValue(record, sourceFilterNameIndex),
+			SourceOwner:      csvRecordValue(record, sourceOwnerIndex),
+			TargetFilterID:   csvRecordValue(record, targetFilterIDIndex),
+			TargetFilterName: csvRecordValue(record, targetFilterNameIndex),
+			TargetOwner:      csvRecordValue(record, targetOwnerIndex),
+			MatchMethod:      csvRecordValue(record, matchMethodIndex),
+			Status:           csvRecordValue(record, statusIndex),
+			Reason:           csvRecordValue(record, reasonIndex),
 		})
 	}
 	return rows, nil

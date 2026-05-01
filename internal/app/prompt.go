@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	term "github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/internal/thirdparty/golang.org/x/term"
@@ -651,6 +652,11 @@ func runConfigInitWizard(cfg Config) error {
 	if err := configureInitCorrectionScopes(wizard, &cfg); err != nil {
 		return err
 	}
+	if issueTeamCorrectionsInScope(cfg) {
+		if err := configurePostMigrateIssueConcurrency(wizard, &cfg); err != nil {
+			return err
+		}
+	}
 
 	setCurrent := "yes"
 	if !editingExisting || store.CurrentProfile != profileName {
@@ -758,6 +764,56 @@ func applyInitSavedProfileDefaults(cfg *Config, profile SavedProfile) {
 	if !cfg.IssueProjectScopeExplicit && strings.TrimSpace(profile.IssueProjectScope) != "" {
 		cfg.IssueProjectScope = profile.IssueProjectScope
 	}
+}
+
+func configurePostMigrateIssueConcurrency(wizard *wizardContext, cfg *Config) error {
+	applyDefaultPostMigrateIssueWorkers(cfg)
+	workers, err := wizard.positiveInt(wizardField{
+		Label:       "Initial issue rewrite workers",
+		Description: "Choose how many concurrent workers post-migrate should start with when updating issue Team-field values.",
+		InputHelp:   "Type a positive whole number and press Enter.",
+		ArtifactInfo: strings.Join([]string{
+			"This only affects post-migrate issue Team-field rewrites.",
+			"Concurrency increases automatically after clean batches and backs off when Jira returns 429.",
+			fmt.Sprintf("The default is %d workers. The maximum is %d workers.", postMigrationIssueApplyWorkers, postMigrationIssueApplyMaxWorkers),
+		}, " "),
+		Default: strconv.Itoa(cfg.PostMigrateIssueWorkers),
+	})
+	if err != nil {
+		return err
+	}
+	cfg.PostMigrateIssueWorkers = workers
+	cfg.PostMigrateIssueWorkersSet = true
+
+	fallbackDefault := cfg.PostMigrateIssueFallbackWorkers
+	if fallbackDefault < 1 || fallbackDefault > cfg.PostMigrateIssueWorkers {
+		fallbackDefault = postMigrationIssueApplyFallbackWorkers
+		if fallbackDefault > cfg.PostMigrateIssueWorkers {
+			fallbackDefault = cfg.PostMigrateIssueWorkers
+		}
+	}
+	fallbackWorkers, err := wizard.positiveInt(wizardField{
+		Label:       "Minimum issue rewrite workers",
+		Description: "Choose the minimum worker count to use when retrying issue Team-field updates after Jira returns 429 Too Many Requests.",
+		InputHelp:   "Type a positive whole number that is not higher than the primary worker count.",
+		ArtifactInfo: strings.Join([]string{
+			"The adaptive runner will not reduce retries below this value.",
+			"The default is 3 workers.",
+		}, " "),
+		Default: strconv.Itoa(fallbackDefault),
+	})
+	if err != nil {
+		return err
+	}
+	if fallbackWorkers > cfg.PostMigrateIssueWorkers {
+		return fmt.Errorf("issue rewrite fallback workers cannot exceed issue rewrite workers")
+	}
+	if workers > postMigrationIssueApplyMaxWorkers || fallbackWorkers > postMigrationIssueApplyMaxWorkers {
+		return fmt.Errorf("issue rewrite workers cannot exceed %d", postMigrationIssueApplyMaxWorkers)
+	}
+	cfg.PostMigrateIssueFallbackWorkers = fallbackWorkers
+	cfg.PostMigrateIssueFallbackWorkersSet = true
+	return nil
 }
 
 func initIssueProjectScopeArtifactInfo(cfg Config, editingExisting bool) string {
@@ -944,6 +1000,23 @@ func (w *wizardContext) value(field wizardField) (string, error) {
 	w.Step++
 	renderWizardSection(w.Title, fmt.Sprintf("Step %d | %s", w.Step, field.Label), []string{field.Description}, field.InputHelp, field.ArtifactInfo, field.Example, promptFooter(field.Default, field.Optional))
 	return readLine(w.Reader, field.Default)
+}
+
+func (w *wizardContext) positiveInt(field wizardField) (int, error) {
+	theme := currentUITheme()
+	for {
+		value, err := w.value(field)
+		if err != nil {
+			return 0, err
+		}
+		parsed, parseErr := strconv.Atoi(strings.TrimSpace(value))
+		if parseErr == nil && parsed > 0 {
+			return parsed, nil
+		}
+
+		fmt.Fprintln(os.Stdout)
+		fmt.Fprintf(os.Stdout, "%s\n", theme.style("Invalid value. Enter a positive whole number.", theme.errorColor))
+	}
 }
 
 func (w *wizardContext) choice(field wizardField, choices []string) (string, error) {
@@ -1481,6 +1554,11 @@ func profileSummary(cfg Config) string {
 	lines = append(lines, fmt.Sprintf("Team scope: %s", cfg.TeamScope))
 	lines = append(lines, fmt.Sprintf("Issue correction project scope: %s", nonEmptyDefault(cfg.IssueProjectScope, "all")))
 	lines = append(lines, fmt.Sprintf("Issue/team corrections in scope: %t", cfg.IssueTeamIDsInScope))
+	if cfg.IssueTeamIDsInScope {
+		applyDefaultPostMigrateIssueWorkers(&cfg)
+		lines = append(lines, fmt.Sprintf("Initial issue rewrite workers: %d", cfg.PostMigrateIssueWorkers))
+		lines = append(lines, fmt.Sprintf("Minimum issue rewrite workers: %d", cfg.PostMigrateIssueFallbackWorkers))
+	}
 	lines = append(lines, fmt.Sprintf("Team-ID filter updates in scope: %t", cfg.FilterTeamIDsInScope))
 	lines = append(lines, fmt.Sprintf("Parent Link corrections in scope: %t", cfg.ParentLinkInScope))
 	if cfg.FilterTeamIDsInScope {

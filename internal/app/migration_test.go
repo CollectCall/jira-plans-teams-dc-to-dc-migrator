@@ -381,6 +381,45 @@ func TestLoadPostMigrateStateReusesPreparedTargetIssueArtifacts(t *testing.T) {
 	}
 }
 
+func TestLoadPostMigrateStateReusesPreparedIssueComparisonWithoutTargetSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "team-id-mapping.migration.csv"), strings.Join([]string{
+		"Source Team ID,Source Team Name,Source Shareable,Target Team ID,Target Team Name,Migration Status,Reason,Conflict Reason",
+		"101,Platform,true,501,Platform,created,,",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(dir, "issues-with-teams.pre-migration.csv"), strings.Join([]string{
+		"Issue Key,Project Key,Project Name,Project Type,Summary,Source Team IDs,Source Team Names,Teams Field ID",
+		"ABC-1,ABC,Project,software,Summary,101,Platform,customfield_10001",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(dir, "issue-team-comparison.post-migration.csv"), strings.Join([]string{
+		"Issue Key,Project Key,Project Name,Project Type,Summary,Source Teams Field ID,Target Teams Field ID,Source Team IDs,Source Team Names,Target Team IDs,Current Target Team IDs,Status,Reason",
+		"ABC-1,ABC,Project,software,Summary,customfield_10001,customfield_20001,101,Platform,501,101,ready,",
+	}, "\n"))
+
+	state, findings := loadMigrationState(Config{
+		Command:                 "migrate",
+		Phase:                   phasePostMigrate,
+		OutputDir:               dir,
+		TargetBaseURL:           "http://127.0.0.1:1",
+		TargetUsername:          "user",
+		TargetPassword:          "pass",
+		ParentLinkInScope:       false,
+		ParentLinkInScopeSet:    true,
+		FilterTeamIDsInScope:    false,
+		FilterTeamIDsInScopeSet: true,
+	})
+
+	if hasErrors(findings) {
+		t.Fatalf("expected no errors, got %#v", findings)
+	}
+	if len(state.IssueComparisons) != 1 || state.IssueComparisons[0].TargetTeamsFieldID != "customfield_20001" {
+		t.Fatalf("expected issue comparison loaded from artifact, got %#v", state.IssueComparisons)
+	}
+	if len(state.TargetIssueSnapshots) != 0 {
+		t.Fatalf("did not expect target issue snapshot to be rebuilt, got %#v", state.TargetIssueSnapshots)
+	}
+}
+
 func TestLoadMigrationStateRejectsOutputDirParentTraversal(t *testing.T) {
 	_, findings := loadMigrationState(Config{
 		Command:   "migrate",
@@ -542,15 +581,20 @@ func TestSavedProfileFromConfigPersistsSkippedIdentityMappingAnswered(t *testing
 
 func TestSavedProfileFromConfigPersistsParentLinkAndIssueScopeSettings(t *testing.T) {
 	profile := savedProfileFromConfig(Config{
-		IssueProjectScope:    "ABC,DEF",
-		ParentLinkInScope:    true,
-		ParentLinkInScopeSet: true,
+		IssueProjectScope:               "ABC,DEF",
+		ParentLinkInScope:               true,
+		ParentLinkInScopeSet:            true,
+		PostMigrateIssueWorkers:         8,
+		PostMigrateIssueFallbackWorkers: 2,
 	}, false)
 	if profile.IssueProjectScope != "ABC,DEF" {
 		t.Fatalf("expected issue project scope to persist, got %q", profile.IssueProjectScope)
 	}
 	if !profile.ParentLinkInScope || !profile.ParentLinkInScopeSet {
 		t.Fatalf("expected parent link scope settings to persist, got %#v", profile)
+	}
+	if profile.PostMigrateIssueWorkers != 8 || profile.PostMigrateIssueFallbackWorkers != 2 {
+		t.Fatalf("expected issue worker settings to persist, got %#v", profile)
 	}
 }
 
@@ -565,6 +609,8 @@ func TestParseConfigLoadsSkippedIdentityMappingDecisionFromProfileStore(t *testi
 		`    identity_mapping_file: ""`,
 		`    identity_mapping_set: "true"`,
 		`    team_scope: "all"`,
+		`    post_migrate_issue_workers: "9"`,
+		`    post_migrate_issue_fallback_workers: "4"`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write config store: %v", err)
@@ -582,6 +628,83 @@ func TestParseConfigLoadsSkippedIdentityMappingDecisionFromProfileStore(t *testi
 	}
 	if cfg.Profile != "default" {
 		t.Fatalf("expected current profile default, got %q", cfg.Profile)
+	}
+	if cfg.PostMigrateIssueWorkers != 9 || cfg.PostMigrateIssueFallbackWorkers != 4 {
+		t.Fatalf("expected issue worker settings to load from profile, got %d/%d", cfg.PostMigrateIssueWorkers, cfg.PostMigrateIssueFallbackWorkers)
+	}
+}
+
+func TestParseConfigFlagOverridesSavedIssueWorkerSettings(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := strings.Join([]string{
+		`current_profile: "default"`,
+		`profiles:`,
+		`  default:`,
+		`    source_base_url: "https://source.example.com/jira"`,
+		`    target_base_url: "https://target.example.com/jira"`,
+		`    team_scope: "all"`,
+		`    post_migrate_issue_workers: "9"`,
+		`    post_migrate_issue_fallback_workers: "4"`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config store: %v", err)
+	}
+
+	cfg, err := parseConfig([]string{
+		"migrate",
+		"--no-input",
+		"--config", configPath,
+		"--post-migrate-issue-workers", "12",
+		"--post-migrate-issue-fallback-workers", "6",
+	})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if cfg.PostMigrateIssueWorkers != 12 || cfg.PostMigrateIssueFallbackWorkers != 6 {
+		t.Fatalf("expected flag issue worker settings to win, got %d/%d", cfg.PostMigrateIssueWorkers, cfg.PostMigrateIssueFallbackWorkers)
+	}
+}
+
+func TestParseConfigCapsDefaultFallbackWorkersToPrimaryWorkers(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg, err := parseConfig([]string{
+		"migrate",
+		"--no-input",
+		"--config", configPath,
+		"--post-migrate-issue-workers", "2",
+	})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if cfg.PostMigrateIssueWorkers != 2 || cfg.PostMigrateIssueFallbackWorkers != 2 {
+		t.Fatalf("expected fallback workers to cap at primary workers, got %d/%d", cfg.PostMigrateIssueWorkers, cfg.PostMigrateIssueFallbackWorkers)
+	}
+}
+
+func TestParseConfigRejectsFallbackWorkersAbovePrimaryWorkers(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	_, err := parseConfig([]string{
+		"migrate",
+		"--no-input",
+		"--config", configPath,
+		"--post-migrate-issue-workers", "2",
+		"--post-migrate-issue-fallback-workers", "3",
+	})
+	if err == nil || !strings.Contains(err.Error(), "fallback workers cannot exceed") {
+		t.Fatalf("expected fallback worker validation error, got %v", err)
+	}
+}
+
+func TestParseConfigRejectsIssueWorkersAboveMax(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	_, err := parseConfig([]string{
+		"migrate",
+		"--no-input",
+		"--config", configPath,
+		"--post-migrate-issue-workers", "41",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot exceed 40") {
+		t.Fatalf("expected max worker validation error, got %v", err)
 	}
 }
 
@@ -2486,6 +2609,16 @@ func TestLoadPostMigrateInputsLoadsFilterTargetMatchBeforePreparingTargets(t *te
 	if hasErrors(findings) {
 		t.Fatalf("expected no errors loading post-migrate inputs, got %#v", findings)
 	}
+	state, findings = loadPostMigrateTargetArtifactsFromExports(cfg, state, nil)
+	if hasErrors(findings) {
+		t.Fatalf("expected no errors loading post-migrate target artifacts, got %#v", findings)
+	}
+	if needsPostMigrationTargetArtifactsPreparation(cfg, state) {
+		findings = preparePostMigrationTargetArtifacts(cfg, &state, nil)
+		if hasErrors(findings) {
+			t.Fatalf("expected no errors preparing post-migrate target artifacts, got %#v", findings)
+		}
+	}
 	if scriptRunnerRequests != 0 {
 		t.Fatalf("expected no ScriptRunner requests, got %d", scriptRunnerRequests)
 	}
@@ -3517,7 +3650,7 @@ func TestApplyPostMigrationIssueCorrectionsRetriesOnlyTooManyRequestsWithFallbac
 		want := 1
 		if issueKey == "TP-2" || issueKey == "TP-5" {
 			want = 2
-			if !strings.Contains(results[i-1].Message, "reduced concurrency from 5 to 3") {
+			if !strings.Contains(results[i-1].Message, "reduced concurrency from 8 to 4") {
 				t.Fatalf("expected fallback retry message for %s, got %q", issueKey, results[i-1].Message)
 			}
 		}
@@ -3527,6 +3660,61 @@ func TestApplyPostMigrationIssueCorrectionsRetriesOnlyTooManyRequestsWithFallbac
 	}
 	if maxActivePUTs < 2 {
 		t.Fatalf("expected first pass to use concurrent PUT requests, max active was %d", maxActivePUTs)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsUsesConfiguredFallbackWorkers(t *testing.T) {
+	state := postMigrationIssueWorkerTestState(4)
+	var mu sync.Mutex
+	putRequestsByIssue := map[string]int{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/TP-"):
+			issueKey := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
+			mu.Lock()
+			putRequestsByIssue[issueKey]++
+			attempt := putRequestsByIssue[issueKey]
+			mu.Unlock()
+			if issueKey == "TP-2" && attempt == 1 {
+				http.Error(w, "too many requests", http.StatusTooManyRequests)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(Config{
+		SkipPostMigrateDriftChecks:      true,
+		PostMigrateIssueWorkers:         4,
+		PostMigrateIssueFallbackWorkers: 1,
+	}, client, &state, &progressTask{})
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings after successful fallback retry: %#v", findings)
+	}
+	if !strings.Contains(results[1].Message, "reduced concurrency from 4 to 2") {
+		t.Fatalf("expected configured fallback retry message, got %q", results[1].Message)
+	}
+	if got := putRequestsByIssue["TP-2"]; got != 2 {
+		t.Fatalf("expected TP-2 to receive two PUT requests, got %d", got)
+	}
+}
+
+func TestAdaptiveIssueApplyWorkerIncreaseCapsAtMax(t *testing.T) {
+	workers := postMigrationIssueApplyWorkers
+	for i := 0; i < 20; i++ {
+		workers = nextPostMigrationIssueWorkerCount(workers)
+	}
+	if workers != postMigrationIssueApplyMaxWorkers {
+		t.Fatalf("expected adaptive workers to cap at %d, got %d", postMigrationIssueApplyMaxWorkers, workers)
 	}
 }
 
@@ -3675,7 +3863,7 @@ func TestApplyPostMigrationIssueCorrectionsRetriesDriftCheckTooManyRequestsWithF
 	if got := putRequestsByIssue["TP-2"]; got != 1 {
 		t.Fatalf("expected TP-2 to be updated once after fallback, got %d PUTs", got)
 	}
-	if !strings.Contains(results[1].Message, "reduced concurrency from 5 to 3") {
+	if !strings.Contains(results[1].Message, "reduced concurrency from 8 to 4") {
 		t.Fatalf("expected fallback retry message for TP-2, got %q", results[1].Message)
 	}
 }

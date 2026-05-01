@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	postMigrationIssueApplyWorkers         = 5
+	postMigrationIssueApplyWorkers         = 8
 	postMigrationIssueApplyFallbackWorkers = 3
+	postMigrationIssueApplyMaxWorkers      = 40
 )
 
 type migrationState struct {
@@ -1988,6 +1989,9 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 			state = postState
 			findings = append(findings, postFindings...)
 		}
+		if needsPostMigrationTargetArtifactsPreparation(cfg, state) {
+			findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, progress)...)
+		}
 	}
 
 	return state, findings
@@ -2150,6 +2154,9 @@ func loadPostMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTra
 	if !cfg.SkipPostMigrateArtifactReuse {
 		state, inputFindings = loadPostMigrateTargetArtifactsFromExports(cfg, state, progress)
 		findings = append(findings, inputFindings...)
+	}
+	if needsPostMigrationTargetArtifactsPreparation(cfg, state) {
+		findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, progress)...)
 	}
 	return state, findings
 }
@@ -2459,8 +2466,6 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 			findings = append(findings, matchFindings...)
 		}
 	}
-
-	findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, progress)...)
 
 	return state, findings
 }
@@ -3105,33 +3110,134 @@ type postMigrationIssueApplyResult struct {
 }
 
 func applyPostMigrationIssueCorrectionsWithFallback(cfg Config, client *jiraClient, comparisons []PostMigrationIssueComparisonRow, targetTeamIDs map[string]string, sourceIssueKeys map[string]struct{}, progress *progressTask) []postMigrationIssueApplyResult {
+	applyDefaultPostMigrateIssueWorkers(&cfg)
+	results := make([]postMigrationIssueApplyResult, len(comparisons))
 	allIndexes := make([]int, len(comparisons))
 	for index := range comparisons {
 		allIndexes[index] = index
 	}
-	results := applyPostMigrationIssueCorrectionsConcurrent(cfg, client, comparisons, targetTeamIDs, sourceIssueKeys, progress, allIndexes, postMigrationIssueApplyWorkers, true)
 
+	workerCount := cfg.PostMigrateIssueWorkers
+	processed := 0
+	for len(allIndexes) > 0 {
+		batchSize := adaptiveIssueApplyBatchSize(workerCount, len(allIndexes))
+		batchIndexes := allIndexes[:batchSize]
+		allIndexes = allIndexes[batchSize:]
+
+		batchResults := applyPostMigrationIssueCorrectionsConcurrent(cfg, client, comparisons, targetTeamIDs, sourceIssueKeys, progress, batchIndexes, workerCount, false)
+		retryIndexes := postMigrationIssueRetryIndexes(batchResults, batchIndexes)
+		batchHadFailure := postMigrationIssueBatchHadFailure(batchResults, batchIndexes)
+		if len(retryIndexes) > 0 {
+			var retryResults []postMigrationIssueApplyResult
+			retryResults, workerCount = retryPostMigrationIssue429s(cfg, client, comparisons, targetTeamIDs, sourceIssueKeys, progress, retryIndexes, workerCount)
+			for _, index := range retryIndexes {
+				batchResults[index] = retryResults[index]
+			}
+			batchHadFailure = batchHadFailure || postMigrationIssueBatchHadFailure(batchResults, retryIndexes)
+		} else if !batchHadFailure && len(allIndexes) > 0 {
+			nextWorkerCount := nextPostMigrationIssueWorkerCount(workerCount)
+			if nextWorkerCount != workerCount {
+				workerCount = nextWorkerCount
+				progress.Detail(fmt.Sprintf("increasing issue apply concurrency to %d workers", workerCount))
+			}
+		}
+
+		for _, index := range batchIndexes {
+			results[index] = batchResults[index]
+		}
+		processed += len(batchIndexes)
+		progress.Update(processed, len(comparisons))
+	}
+	return results
+}
+
+func adaptiveIssueApplyBatchSize(workerCount, remaining int) int {
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	size := workerCount * 10
+	if size < 50 {
+		size = 50
+	}
+	if size > remaining {
+		return remaining
+	}
+	return size
+}
+
+func nextPostMigrationIssueWorkerCount(workerCount int) int {
+	if workerCount < 1 {
+		return 1
+	}
+	if workerCount >= postMigrationIssueApplyMaxWorkers {
+		return postMigrationIssueApplyMaxWorkers
+	}
+	increase := workerCount / 2
+	if increase < 1 {
+		increase = 1
+	}
+	next := workerCount + increase
+	if next > postMigrationIssueApplyMaxWorkers {
+		return postMigrationIssueApplyMaxWorkers
+	}
+	return next
+}
+
+func reducedPostMigrationIssueWorkerCount(current, minimum int) int {
+	if current <= minimum {
+		return minimum
+	}
+	reduced := current / 2
+	if reduced < minimum {
+		return minimum
+	}
+	return reduced
+}
+
+func postMigrationIssueRetryIndexes(results []postMigrationIssueApplyResult, indexes []int) []int {
 	retryIndexes := make([]int, 0)
-	for index, rowResult := range results {
-		if rowResult.retry429 {
+	for _, index := range indexes {
+		if results[index].retry429 {
 			retryIndexes = append(retryIndexes, index)
 		}
 	}
-	if len(retryIndexes) == 0 {
-		return results
-	}
+	return retryIndexes
+}
 
-	progress.Detail(fmt.Sprintf("retrying %d issue updates with %d workers after Jira 429 responses", len(retryIndexes), postMigrationIssueApplyFallbackWorkers))
-	retryResults := applyPostMigrationIssueCorrectionsConcurrent(cfg, client, comparisons, targetTeamIDs, sourceIssueKeys, progress, retryIndexes, postMigrationIssueApplyFallbackWorkers, false)
-	for _, index := range retryIndexes {
-		if retryResults[index].result.Status == "updated" {
-			retryResults[index].result.Message = postMigrationIssueRetrySuccessMessage(cfg)
-		} else if retryResults[index].result.Message != "" {
-			retryResults[index].result.Message = fmt.Sprintf("%s; retried after reducing issue apply concurrency from %d to %d", retryResults[index].result.Message, postMigrationIssueApplyWorkers, postMigrationIssueApplyFallbackWorkers)
+func postMigrationIssueBatchHadFailure(results []postMigrationIssueApplyResult, indexes []int) bool {
+	for _, index := range indexes {
+		if strings.Contains(results[index].result.Status, "failed") {
+			return true
 		}
-		results[index] = retryResults[index]
 	}
-	return results
+	return false
+}
+
+func retryPostMigrationIssue429s(cfg Config, client *jiraClient, comparisons []PostMigrationIssueComparisonRow, targetTeamIDs map[string]string, sourceIssueKeys map[string]struct{}, progress *progressTask, retryIndexes []int, workerCount int) ([]postMigrationIssueApplyResult, int) {
+	results := make([]postMigrationIssueApplyResult, len(comparisons))
+	originalWorkerCount := workerCount
+	for len(retryIndexes) > 0 {
+		nextWorkerCount := reducedPostMigrationIssueWorkerCount(workerCount, cfg.PostMigrateIssueFallbackWorkers)
+		progress.Detail(fmt.Sprintf("retrying %d issue updates with %d workers after Jira 429 responses", len(retryIndexes), nextWorkerCount))
+		retryResults := applyPostMigrationIssueCorrectionsConcurrent(cfg, client, comparisons, targetTeamIDs, sourceIssueKeys, progress, retryIndexes, nextWorkerCount, false)
+		nextRetryIndexes := make([]int, 0)
+		for _, index := range retryIndexes {
+			result := retryResults[index]
+			if result.retry429 && nextWorkerCount > cfg.PostMigrateIssueFallbackWorkers {
+				nextRetryIndexes = append(nextRetryIndexes, index)
+				continue
+			}
+			if result.result.Status == "updated" {
+				result.result.Message = postMigrationIssueRetrySuccessMessage(cfg, originalWorkerCount, nextWorkerCount)
+			} else if result.result.Message != "" {
+				result.result.Message = fmt.Sprintf("%s; retried after reducing issue apply concurrency from %d to %d", result.result.Message, originalWorkerCount, nextWorkerCount)
+			}
+			results[index] = result
+		}
+		workerCount = nextWorkerCount
+		retryIndexes = nextRetryIndexes
+	}
+	return results, workerCount
 }
 
 func applyPostMigrationIssueCorrectionsConcurrent(cfg Config, client *jiraClient, comparisons []PostMigrationIssueComparisonRow, targetTeamIDs map[string]string, sourceIssueKeys map[string]struct{}, progress *progressTask, indexes []int, workerCount int, updateProgress bool) []postMigrationIssueApplyResult {
@@ -3174,11 +3280,11 @@ func applyPostMigrationIssueCorrectionsConcurrent(cfg Config, client *jiraClient
 	return results
 }
 
-func postMigrationIssueRetrySuccessMessage(cfg Config) string {
+func postMigrationIssueRetrySuccessMessage(cfg Config, fromWorkers, toWorkers int) string {
 	if cfg.SkipPostMigrateDriftChecks {
-		return fmt.Sprintf("Updated target issue from prepared comparison after retrying with reduced concurrency from %d to %d", postMigrationIssueApplyWorkers, postMigrationIssueApplyFallbackWorkers)
+		return fmt.Sprintf("Updated target issue from prepared comparison after retrying with reduced concurrency from %d to %d", fromWorkers, toWorkers)
 	}
-	return fmt.Sprintf("Updated target issue Teams field after retrying with reduced concurrency from %d to %d", postMigrationIssueApplyWorkers, postMigrationIssueApplyFallbackWorkers)
+	return fmt.Sprintf("Updated target issue Teams field after retrying with reduced concurrency from %d to %d", fromWorkers, toWorkers)
 }
 
 func applyPostMigrationIssueCorrection(cfg Config, client *jiraClient, comparison PostMigrationIssueComparisonRow, targetTeamIDs map[string]string, sourceIssueKeys map[string]struct{}, progress *progressTask) postMigrationIssueApplyResult {

@@ -21,27 +21,29 @@ type ProfileStore struct {
 }
 
 type SavedProfile struct {
-	SourceBaseURL               string
-	TargetBaseURL               string
-	IdentityMappingFile         string
-	IdentityMappingSet          bool
-	TeamsFile                   string
-	PersonsFile                 string
-	ResourcesFile               string
-	IssuesCSV                   string
-	FilterSourceCSV             string
-	OutputDir                   string
-	TeamScope                   string
-	IssueProjectScope           string
-	IssueTeamIDsInScope         bool
-	IssueTeamIDsInScopeSet      bool
-	FilterTeamIDsInScope        bool
-	FilterTeamIDsInScopeSet     bool
-	ParentLinkInScope           bool
-	ParentLinkInScopeSet        bool
-	FilterDataSource            string
-	FilterScriptRunnerInstalled bool
-	FilterScriptRunnerEndpoint  string
+	SourceBaseURL                   string
+	TargetBaseURL                   string
+	IdentityMappingFile             string
+	IdentityMappingSet              bool
+	TeamsFile                       string
+	PersonsFile                     string
+	ResourcesFile                   string
+	IssuesCSV                       string
+	FilterSourceCSV                 string
+	OutputDir                       string
+	TeamScope                       string
+	IssueProjectScope               string
+	IssueTeamIDsInScope             bool
+	IssueTeamIDsInScopeSet          bool
+	FilterTeamIDsInScope            bool
+	FilterTeamIDsInScopeSet         bool
+	ParentLinkInScope               bool
+	ParentLinkInScopeSet            bool
+	FilterDataSource                string
+	FilterScriptRunnerInstalled     bool
+	FilterScriptRunnerEndpoint      string
+	PostMigrateIssueWorkers         int
+	PostMigrateIssueFallbackWorkers int
 }
 
 func defaultConfigPath() string {
@@ -204,6 +206,12 @@ func applySavedProfile(cfg *Config, profile SavedProfile) {
 	if cfg.FilterScriptRunnerEndpoint == "" {
 		cfg.FilterScriptRunnerEndpoint = profile.FilterScriptRunnerEndpoint
 	}
+	if !cfg.PostMigrateIssueWorkersSet && profile.PostMigrateIssueWorkers > 0 {
+		cfg.PostMigrateIssueWorkers = profile.PostMigrateIssueWorkers
+	}
+	if !cfg.PostMigrateIssueFallbackWorkersSet && profile.PostMigrateIssueFallbackWorkers > 0 {
+		cfg.PostMigrateIssueFallbackWorkers = profile.PostMigrateIssueFallbackWorkers
+	}
 }
 
 func profileNames(store ProfileStore) []string {
@@ -234,27 +242,29 @@ func resolveProfile(cfg Config, store ProfileStore) (string, SavedProfile, bool)
 
 func savedProfileFromConfig(cfg Config, includeSecrets bool) SavedProfile {
 	profile := SavedProfile{
-		SourceBaseURL:               cfg.SourceBaseURL,
-		TargetBaseURL:               cfg.TargetBaseURL,
-		IdentityMappingFile:         cfg.IdentityMappingFile,
-		IdentityMappingSet:          cfg.IdentityMappingSet || strings.TrimSpace(cfg.IdentityMappingFile) != "",
-		TeamsFile:                   cfg.TeamsFile,
-		PersonsFile:                 cfg.PersonsFile,
-		ResourcesFile:               cfg.ResourcesFile,
-		IssuesCSV:                   cfg.IssuesCSV,
-		FilterSourceCSV:             cfg.FilterSourceCSV,
-		OutputDir:                   cfg.OutputDir,
-		TeamScope:                   cfg.TeamScope,
-		IssueProjectScope:           cfg.IssueProjectScope,
-		IssueTeamIDsInScope:         cfg.IssueTeamIDsInScope,
-		IssueTeamIDsInScopeSet:      cfg.IssueTeamIDsInScopeSet,
-		FilterTeamIDsInScope:        cfg.FilterTeamIDsInScope,
-		FilterTeamIDsInScopeSet:     cfg.FilterTeamIDsInScopeSet,
-		ParentLinkInScope:           cfg.ParentLinkInScope,
-		ParentLinkInScopeSet:        cfg.ParentLinkInScopeSet,
-		FilterDataSource:            cfg.FilterDataSource,
-		FilterScriptRunnerInstalled: cfg.FilterScriptRunnerInstalled,
-		FilterScriptRunnerEndpoint:  cfg.FilterScriptRunnerEndpoint,
+		SourceBaseURL:                   cfg.SourceBaseURL,
+		TargetBaseURL:                   cfg.TargetBaseURL,
+		IdentityMappingFile:             cfg.IdentityMappingFile,
+		IdentityMappingSet:              cfg.IdentityMappingSet || strings.TrimSpace(cfg.IdentityMappingFile) != "",
+		TeamsFile:                       cfg.TeamsFile,
+		PersonsFile:                     cfg.PersonsFile,
+		ResourcesFile:                   cfg.ResourcesFile,
+		IssuesCSV:                       cfg.IssuesCSV,
+		FilterSourceCSV:                 cfg.FilterSourceCSV,
+		OutputDir:                       cfg.OutputDir,
+		TeamScope:                       cfg.TeamScope,
+		IssueProjectScope:               cfg.IssueProjectScope,
+		IssueTeamIDsInScope:             cfg.IssueTeamIDsInScope,
+		IssueTeamIDsInScopeSet:          cfg.IssueTeamIDsInScopeSet,
+		FilterTeamIDsInScope:            cfg.FilterTeamIDsInScope,
+		FilterTeamIDsInScopeSet:         cfg.FilterTeamIDsInScopeSet,
+		ParentLinkInScope:               cfg.ParentLinkInScope,
+		ParentLinkInScopeSet:            cfg.ParentLinkInScopeSet,
+		FilterDataSource:                cfg.FilterDataSource,
+		FilterScriptRunnerInstalled:     cfg.FilterScriptRunnerInstalled,
+		FilterScriptRunnerEndpoint:      cfg.FilterScriptRunnerEndpoint,
+		PostMigrateIssueWorkers:         cfg.PostMigrateIssueWorkers,
+		PostMigrateIssueFallbackWorkers: cfg.PostMigrateIssueFallbackWorkers,
 	}
 	_ = includeSecrets
 	return profile
@@ -288,6 +298,8 @@ func profileEntries(profile SavedProfile) []profileEntry {
 		{key: "filter_data_source", value: profile.FilterDataSource},
 		{key: "filter_scriptrunner_installed", value: formatBool(profile.FilterScriptRunnerInstalled)},
 		{key: "filter_scriptrunner_endpoint", value: profile.FilterScriptRunnerEndpoint},
+		{key: "post_migrate_issue_workers", value: formatInt(profile.PostMigrateIssueWorkers)},
+		{key: "post_migrate_issue_fallback_workers", value: formatInt(profile.PostMigrateIssueFallbackWorkers)},
 	}
 }
 
@@ -336,6 +348,10 @@ func assignProfileField(profile *SavedProfile, key, value string) {
 		profile.FilterScriptRunnerInstalled = parseBoolScalar(value)
 	case "filter_scriptrunner_endpoint":
 		profile.FilterScriptRunnerEndpoint = value
+	case "post_migrate_issue_workers":
+		profile.PostMigrateIssueWorkers = parseIntScalar(value)
+	case "post_migrate_issue_fallback_workers":
+		profile.PostMigrateIssueFallbackWorkers = parseIntScalar(value)
 	}
 }
 
@@ -359,6 +375,21 @@ func formatBool(value bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+func formatInt(value int) string {
+	if value == 0 {
+		return ""
+	}
+	return strconv.Itoa(value)
+}
+
+func parseIntScalar(value string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0
+	}
+	return parsed
 }
 
 func parseBoolScalar(value string) bool {

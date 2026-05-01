@@ -8,29 +8,32 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	envSourceBaseURL     = "TEAMS_MIGRATOR_SOURCE_BASE_URL"
-	envSourceUsername    = "TEAMS_MIGRATOR_SOURCE_USERNAME"
-	envTargetBaseURL     = "TEAMS_MIGRATOR_TARGET_BASE_URL"
-	envTargetUsername    = "TEAMS_MIGRATOR_TARGET_USERNAME"
-	envIdentityMapping   = "TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE"
-	envTeamsFile         = "TEAMS_MIGRATOR_TEAMS_FILE"
-	envPersonsFile       = "TEAMS_MIGRATOR_PERSONS_FILE"
-	envResourcesFile     = "TEAMS_MIGRATOR_RESOURCES_FILE"
-	envIssuesCSV         = "TEAMS_MIGRATOR_ISSUES_CSV"
-	envFilterSourceCSV   = "TEAMS_MIGRATOR_FILTER_SOURCE_CSV"
-	envOutputDir         = "TEAMS_MIGRATOR_OUTPUT_DIR"
-	envReportFormat      = "TEAMS_MIGRATOR_REPORT_FORMAT"
-	envTeamScope         = "TEAMS_MIGRATOR_TEAM_SCOPE"
-	envIssueProjectScope = "TEAMS_MIGRATOR_ISSUE_PROJECT_SCOPE"
-	envStrict            = "TEAMS_MIGRATOR_STRICT"
-	envDryRun            = "TEAMS_MIGRATOR_DRY_RUN"
-	envReportInput       = "TEAMS_MIGRATOR_REPORT_INPUT"
-	envPhase             = "TEAMS_MIGRATOR_PHASE"
+	envSourceBaseURL                   = "TEAMS_MIGRATOR_SOURCE_BASE_URL"
+	envSourceUsername                  = "TEAMS_MIGRATOR_SOURCE_USERNAME"
+	envTargetBaseURL                   = "TEAMS_MIGRATOR_TARGET_BASE_URL"
+	envTargetUsername                  = "TEAMS_MIGRATOR_TARGET_USERNAME"
+	envIdentityMapping                 = "TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE"
+	envTeamsFile                       = "TEAMS_MIGRATOR_TEAMS_FILE"
+	envPersonsFile                     = "TEAMS_MIGRATOR_PERSONS_FILE"
+	envResourcesFile                   = "TEAMS_MIGRATOR_RESOURCES_FILE"
+	envIssuesCSV                       = "TEAMS_MIGRATOR_ISSUES_CSV"
+	envFilterSourceCSV                 = "TEAMS_MIGRATOR_FILTER_SOURCE_CSV"
+	envOutputDir                       = "TEAMS_MIGRATOR_OUTPUT_DIR"
+	envReportFormat                    = "TEAMS_MIGRATOR_REPORT_FORMAT"
+	envTeamScope                       = "TEAMS_MIGRATOR_TEAM_SCOPE"
+	envIssueProjectScope               = "TEAMS_MIGRATOR_ISSUE_PROJECT_SCOPE"
+	envStrict                          = "TEAMS_MIGRATOR_STRICT"
+	envDryRun                          = "TEAMS_MIGRATOR_DRY_RUN"
+	envReportInput                     = "TEAMS_MIGRATOR_REPORT_INPUT"
+	envPhase                           = "TEAMS_MIGRATOR_PHASE"
+	envPostMigrateIssueWorkers         = "TEAMS_MIGRATOR_POST_MIGRATE_ISSUE_WORKERS"
+	envPostMigrateIssueFallbackWorkers = "TEAMS_MIGRATOR_POST_MIGRATE_ISSUE_FALLBACK_WORKERS"
 )
 
 const (
@@ -39,50 +42,54 @@ const (
 )
 
 type Config struct {
-	Command                      string
-	Help                         bool
-	SourceBaseURL                string
-	SourceUsername               string
-	SourcePassword               string
-	TargetBaseURL                string
-	TargetUsername               string
-	TargetPassword               string
-	IdentityMappingFile          string
-	IdentityMappingSet           bool
-	TeamsFile                    string
-	PersonsFile                  string
-	ResourcesFile                string
-	IssuesCSV                    string
-	FilterSourceCSV              string
-	OutputDir                    string
-	ReportInput                  string
-	ReportFormat                 ReportFormat
-	TeamScope                    string
-	IssueProjectScope            string
-	IssueProjectScopeExplicit    bool
-	IssueTeamIDsInScope          bool
-	IssueTeamIDsInScopeSet       bool
-	FilterTeamIDsInScope         bool
-	FilterTeamIDsInScopeSet      bool
-	ParentLinkInScope            bool
-	ParentLinkInScopeSet         bool
-	FilterDataSource             string
-	FilterScriptRunnerInstalled  bool
-	FilterScriptRunnerEndpoint   string
-	Strict                       bool
-	DryRun                       bool
-	Apply                        bool
-	SkipPostMigrateDriftChecks   bool
-	PostMigrateDriftCheckSet     bool
-	SkipPostMigrateArtifactReuse bool
-	NoInput                      bool
-	ConfigPath                   string
-	Profile                      string
-	ProfileExplicit              bool
-	ProfileLoaded                bool
-	OutputTimestamp              string
-	Phase                        string
-	PhaseExplicit                bool
+	Command                            string
+	Help                               bool
+	SourceBaseURL                      string
+	SourceUsername                     string
+	SourcePassword                     string
+	TargetBaseURL                      string
+	TargetUsername                     string
+	TargetPassword                     string
+	IdentityMappingFile                string
+	IdentityMappingSet                 bool
+	TeamsFile                          string
+	PersonsFile                        string
+	ResourcesFile                      string
+	IssuesCSV                          string
+	FilterSourceCSV                    string
+	OutputDir                          string
+	ReportInput                        string
+	ReportFormat                       ReportFormat
+	TeamScope                          string
+	IssueProjectScope                  string
+	IssueProjectScopeExplicit          bool
+	IssueTeamIDsInScope                bool
+	IssueTeamIDsInScopeSet             bool
+	FilterTeamIDsInScope               bool
+	FilterTeamIDsInScopeSet            bool
+	ParentLinkInScope                  bool
+	ParentLinkInScopeSet               bool
+	FilterDataSource                   string
+	FilterScriptRunnerInstalled        bool
+	FilterScriptRunnerEndpoint         string
+	Strict                             bool
+	DryRun                             bool
+	Apply                              bool
+	SkipPostMigrateDriftChecks         bool
+	PostMigrateDriftCheckSet           bool
+	SkipPostMigrateArtifactReuse       bool
+	PostMigrateIssueWorkers            int
+	PostMigrateIssueWorkersSet         bool
+	PostMigrateIssueFallbackWorkers    int
+	PostMigrateIssueFallbackWorkersSet bool
+	NoInput                            bool
+	ConfigPath                         string
+	Profile                            string
+	ProfileExplicit                    bool
+	ProfileLoaded                      bool
+	OutputTimestamp                    string
+	Phase                              string
+	PhaseExplicit                      bool
 }
 
 func parseConfig(args []string) (Config, error) {
@@ -118,6 +125,16 @@ func parseConfig(args []string) (Config, error) {
 	fs.StringVar(&cfg.Phase, "phase", envValue(envPhase), "Migration phase for migrate: pre-migrate, migrate, or post-migrate")
 	fs.StringVar(&cfg.TeamScope, "team-scope", envValue(envTeamScope), "Team migration scope: all, shared-only, or non-shared-only")
 	fs.StringVar(&cfg.IssueProjectScope, "issue-project-scope", envValue(envIssueProjectScope), "Issue correction project scope: all or a comma-separated list of Jira project keys")
+	postMigrateIssueWorkers, err := intEnv(envPostMigrateIssueWorkers)
+	if err != nil {
+		return Config{}, err
+	}
+	postMigrateIssueFallbackWorkers, err := intEnv(envPostMigrateIssueFallbackWorkers)
+	if err != nil {
+		return Config{}, err
+	}
+	fs.IntVar(&cfg.PostMigrateIssueWorkers, "post-migrate-issue-workers", postMigrateIssueWorkers, "Initial concurrent workers for adaptive post-migrate issue Team-field rewrites")
+	fs.IntVar(&cfg.PostMigrateIssueFallbackWorkers, "post-migrate-issue-fallback-workers", postMigrateIssueFallbackWorkers, "Minimum retry workers for adaptive post-migrate issue Team-field rewrites after Jira 429 responses")
 
 	reportFormat := ""
 	if command == "report" {
@@ -127,6 +144,8 @@ func parseConfig(args []string) (Config, error) {
 	profileExplicit := envIsSet(envProfile) || stringFlagProvided(remaining, "--profile")
 	issueProjectScopeExplicit := envIsSet(envIssueProjectScope) || stringFlagProvided(remaining, "--issue-project-scope")
 	postMigrateDriftCheckSet := stringFlagProvided(remaining, "--skip-post-migrate-drift-checks")
+	postMigrateIssueWorkersSet := envIsSet(envPostMigrateIssueWorkers) || stringFlagProvided(remaining, "--post-migrate-issue-workers")
+	postMigrateIssueFallbackWorkersSet := envIsSet(envPostMigrateIssueFallbackWorkers) || stringFlagProvided(remaining, "--post-migrate-issue-fallback-workers")
 	fs.StringVar(&reportFormat, "format", reportFormat, "Report format: json or csv")
 
 	cfg.Strict = boolEnv(envStrict, false)
@@ -174,6 +193,8 @@ func parseConfig(args []string) (Config, error) {
 	cfg.ProfileExplicit = profileExplicit
 	cfg.IssueProjectScopeExplicit = issueProjectScopeExplicit
 	cfg.PostMigrateDriftCheckSet = postMigrateDriftCheckSet
+	cfg.PostMigrateIssueWorkersSet = postMigrateIssueWorkersSet
+	cfg.PostMigrateIssueFallbackWorkersSet = postMigrateIssueFallbackWorkersSet
 
 	if cfg.Command != "init" && cfg.Command != "config show" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" {
 		store, err := loadProfileStore(cfg.ConfigPath)
@@ -223,12 +244,37 @@ func parseConfig(args []string) (Config, error) {
 	if cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir); err != nil {
 		return Config{}, err
 	}
+	applyDefaultPostMigrateIssueWorkers(&cfg)
 
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
 	}
 
 	return cfg, nil
+}
+
+func intEnv(name string) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+	return parsed, nil
+}
+
+func applyDefaultPostMigrateIssueWorkers(cfg *Config) {
+	if cfg.PostMigrateIssueWorkers == 0 {
+		cfg.PostMigrateIssueWorkers = postMigrationIssueApplyWorkers
+	}
+	if cfg.PostMigrateIssueFallbackWorkers == 0 {
+		cfg.PostMigrateIssueFallbackWorkers = postMigrationIssueApplyFallbackWorkers
+	}
+	if !cfg.PostMigrateIssueFallbackWorkersSet && cfg.PostMigrateIssueFallbackWorkers > cfg.PostMigrateIssueWorkers {
+		cfg.PostMigrateIssueFallbackWorkers = cfg.PostMigrateIssueWorkers
+	}
 }
 
 func applyDefaultReferenceExportScopes(cfg *Config) {
@@ -328,6 +374,21 @@ func (c Config) validate() error {
 		if normalizeMigrationPhase(c.Phase) == "" {
 			return fmt.Errorf("unsupported migration phase %q; use pre-migrate, migrate, or post-migrate", c.Phase)
 		}
+	}
+	if c.PostMigrateIssueWorkers < 1 {
+		return errors.New("post-migrate issue workers must be at least 1")
+	}
+	if c.PostMigrateIssueWorkers > postMigrationIssueApplyMaxWorkers {
+		return fmt.Errorf("post-migrate issue workers cannot exceed %d", postMigrationIssueApplyMaxWorkers)
+	}
+	if c.PostMigrateIssueFallbackWorkers < 1 {
+		return errors.New("post-migrate issue fallback workers must be at least 1")
+	}
+	if c.PostMigrateIssueFallbackWorkers > postMigrationIssueApplyMaxWorkers {
+		return fmt.Errorf("post-migrate issue fallback workers cannot exceed %d", postMigrationIssueApplyMaxWorkers)
+	}
+	if c.PostMigrateIssueFallbackWorkers > c.PostMigrateIssueWorkers {
+		return errors.New("post-migrate issue fallback workers cannot exceed post-migrate issue workers")
 	}
 
 	return nil

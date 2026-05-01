@@ -4,6 +4,7 @@ bin/
 .gopath/
 .tmp-go-build-cache/
 out/
+tmp/
 .tmp-e2e/
 .tmp-e2e-*/
 .tmp-playwright/
